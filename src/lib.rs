@@ -115,6 +115,48 @@ fn make_positive_xyb(xyb: &mut Xyb) {
     });
 }
 
+fn image_multiply(img1: &Xyb, img2: &Xyb, out: &mut [[f32; 3]]) {
+    img1.data()
+        .iter()
+        .zip(img2.data().iter())
+        .zip(out.iter_mut())
+        .for_each(|((p1, p2), o)| {
+            for x in 0..3 {
+                o[x] = p1[x] * p2[x];
+            }
+        });
+}
+
+fn downscale_by_2(img: &Xyb) -> Xyb {
+    const SCALE: usize = 2;
+    let out_w = (img.width() + SCALE - 1) / SCALE;
+    let out_h = (img.height() + SCALE - 1) / SCALE;
+    let in_data = img.data();
+    let mut out_data = vec![[0.0f32; 3]; out_w * out_h];
+    let normalize = 1f32 / (SCALE * SCALE) as f32;
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let mut sum = [0f32; 3];
+            for iy in 0..SCALE {
+                for ix in 0..SCALE {
+                    let x = (ox * SCALE + ix).min(img.width() - 1);
+                    let y = (oy * SCALE + iy).min(img.height() - 1);
+                    let in_pix = in_data[y * img.width() + x];
+                    for c in 0..3 {
+                        sum[c] += in_pix[c];
+                    }
+                }
+            }
+            let out_pix = out_data[oy * out_w + ox];
+            for c in 0..3 {
+                out_pix[c] = sum[c] * normalize;
+            }
+        }
+    }
+
+    Xyb::new(out_data, out_w, out_h).expect("output image is valid")
+}
+
 #[derive(Debug, Clone, Default)]
 struct Msssim {
     pub scales: Vec<MsssimScale>,
