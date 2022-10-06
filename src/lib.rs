@@ -111,8 +111,8 @@ pub fn compute_frame_ssimulacra2<T: Pixel>(source: &Yuv<T>, distorted: &Yuv<T>) 
         let mu1 = blur.blur(&img1);
         let mu2 = blur.blur(&img2);
 
-        let avg_ssim = ssim_map(&mu1, &mu2, &sigma1_sq, &sigma2_sq, &sigma12);
-        let avg_edgediff = edge_diff_map(&img1, &mu1, &img2, &mu2);
+        let avg_ssim = ssim_map(width, height, &mu1, &mu2, &sigma1_sq, &sigma2_sq, &sigma12);
+        let avg_edgediff = edge_diff_map(width, height, &img1, &mu1, &img2, &mu2);
         msssim.scales.push(MsssimScale {
             avg_ssim,
             avg_edgediff,
@@ -196,22 +196,92 @@ fn downscale_by_2(
 }
 
 fn ssim_map(
+    width: usize,
+    height: usize,
     m1: &[Vec<f32>; 3],
     m2: &[Vec<f32>; 3],
     s11: &[Vec<f32>; 3],
     s22: &[Vec<f32>; 3],
     s12: &[Vec<f32>; 3],
 ) -> [f64; 3 * 2] {
-    todo!()
+    const C1: f32 = 0.0001f32;
+    const C2: f32 = 0.0003f32;
+
+    let one_per_pixels = 1.0f64 / (width * height) as f64;
+    let mut plane_averages = [0f64; 3 * 2];
+
+    for c in 0..3 {
+        let mut sum1 = [0.0f64; 2];
+        for y in 0..height {
+            let row_m1 = &m1[c][(y * width)..][..width];
+            let row_m2 = &m2[c][(y * width)..][..width];
+            let row_s11 = &s11[c][(y * width)..][..width];
+            let row_s22 = &s22[c][(y * width)..][..width];
+            let row_s12 = &s12[c][(y * width)..][..width];
+            for x in 0..width {
+                let mu1 = row_m1[x];
+                let mu2 = row_m2[x];
+                let mu11 = mu1 * mu1;
+                let mu22 = mu2 * mu2;
+                let mu12 = mu1 * mu2;
+                let num_m = 2f32.mul_add(mu12, C1);
+                let num_s = 2f32.mul_add(row_s12[x] - mu12, C2);
+                let denom_m = mu11 + mu22 + C1;
+                let denom_s = (row_s11[x] - mu11) + (row_s22[x] - mu22) + C2;
+                let mut d = 1.0f64 - f64::from((num_m * num_s) / (denom_m * denom_s));
+                d = d.max(0.0);
+                sum1[0] += d;
+                sum1[1] += d.powi(4);
+            }
+        }
+        plane_averages[c * 2] = one_per_pixels * sum1[0];
+        plane_averages[c * 2 + 1] = (one_per_pixels * sum1[1]).sqrt().sqrt();
+    }
+
+    plane_averages
 }
 
 fn edge_diff_map(
+    width: usize,
+    height: usize,
     img1: &[Vec<f32>; 3],
     mu1: &[Vec<f32>; 3],
     img2: &[Vec<f32>; 3],
     mu2: &[Vec<f32>; 3],
 ) -> [f64; 3 * 4] {
-    todo!()
+    let one_per_pixels = 1.0f64 / (width * height) as f64;
+    let mut plane_averages = [0f64; 3 * 4];
+
+    for c in 0..3 {
+        let mut sum1 = [0.0f64; 4];
+        for y in 0..height {
+            let row1 = &img1[c][(y * width)..][..width];
+            let row2 = &img2[c][(y * width)..][..width];
+            let rowm1 = &mu1[c][(y * width)..][..width];
+            let rowm2 = &mu2[c][(y * width)..][..width];
+            for x in 0..width {
+                let d1: f64 = (1.0 + f64::from((row2[x] - rowm2[x]).abs()))
+                    / (1.0 + f64::from((row1[x] - rowm1[x]).abs()))
+                    - 1.0;
+                // d1 > 0: distorted has an edge where original is smooth
+                //         (indicating ringing, color banding, blockiness, etc)
+                // d1 < 0: original has an edge where distorted is smooth
+                //         (indicating smoothing, blurring, smearing, etc)
+                let artifact = d1.max(0.0);
+                sum1[0] += artifact;
+                sum1[1] += artifact.powi(4);
+                let detail_lost = -d1.max(0.0);
+                sum1[2] += detail_lost;
+                sum1[3] += detail_lost.powi(4);
+            }
+        }
+        plane_averages[c * 4] = one_per_pixels * sum1[0];
+        plane_averages[c * 4 + 1] = (one_per_pixels * sum1[1]).sqrt().sqrt();
+        plane_averages[c * 4 + 2] = one_per_pixels * sum1[2];
+        plane_averages[c * 4 + 3] = (one_per_pixels * sum1[3]).sqrt().sqrt();
+    }
+
+    plane_averages
 }
 
 #[derive(Debug, Clone, Default)]
