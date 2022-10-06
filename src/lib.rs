@@ -123,44 +123,38 @@ pub fn compute_frame_ssimulacra2<T: Pixel>(source: &Yuv<T>, distorted: &Yuv<T>) 
 }
 
 fn make_positive_xyb(xyb: &mut Xyb) {
-    xyb.data_mut().iter_mut().for_each(|pix| {
+    for pix in xyb.data_mut().iter_mut() {
         pix[2] += 1.0 - pix[1];
         pix[0] += 0.5;
-    });
+    }
 }
 
 fn xyb_to_planar(xyb: &Xyb) -> [Vec<f32>; 3] {
     let mut out1 = vec![0.0f32; xyb.width() * xyb.height()];
     let mut out2 = vec![0.0f32; xyb.width() * xyb.height()];
     let mut out3 = vec![0.0f32; xyb.width() * xyb.height()];
-    xyb.data()
+    for (((i, o1), o2), o3) in xyb
+        .data()
         .iter()
         .copied()
         .zip(out1.iter_mut())
         .zip(out2.iter_mut())
         .zip(out3.iter_mut())
-        .for_each(|(((i, o1), o2), o3)| {
-            *o1 = i[0];
-            *o2 = i[1];
-            *o3 = i[2];
-        });
+    {
+        *o1 = i[0];
+        *o2 = i[1];
+        *o3 = i[2];
+    }
 
     [out1, out2, out3]
 }
 
 fn image_multiply(img1: &[Vec<f32>; 3], img2: &[Vec<f32>; 3], out: &mut [Vec<f32>; 3]) {
-    img1.iter()
-        .zip(img2.iter())
-        .zip(out.iter_mut())
-        .for_each(|((plane1, plane2), out_plane)| {
-            plane1
-                .iter()
-                .zip(plane2.iter())
-                .zip(out_plane.iter_mut())
-                .for_each(|((&p1, &p2), o)| {
-                    *o = p1 * p2;
-                });
-        });
+    for ((plane1, plane2), out_plane) in img1.iter().zip(img2.iter()).zip(out.iter_mut()) {
+        for ((&p1, &p2), o) in plane1.iter().zip(plane2.iter()).zip(out_plane.iter_mut()) {
+            *o = p1 * p2;
+        }
+    }
 }
 
 fn downscale_by_2(
