@@ -1,12 +1,9 @@
-use std::{
-    f64::consts::PI,
-    mem::{size_of, transmute},
-};
+use std::{f64::consts::PI, mem::size_of};
 
 use aligned::{Aligned, A16};
 use nalgebra::base::{Matrix3, Matrix3x1};
 use num_traits::PrimInt;
-use wide::{f32x4, u8x16};
+use wide::f32x4;
 
 pub struct Blur {
     kernel: RecursiveGaussian,
@@ -464,21 +461,21 @@ impl RecursiveGaussian {
         while n < 0 {
             // bottom is always non-negative since n is initialized in -N + 1.
             let bottom = n + self.radius as isize - 1;
-            self.vertical_block::<VECTORS>(
+            vertical_block::<VECTORS>(
                 d1_1,
                 d1_3,
                 d1_5,
                 n2_1,
                 n2_3,
                 n2_5,
-                VertBlockInput::SingleInput(if bottom < height as isize {
+                &VertBlockInput::SingleInput(if bottom < height as isize {
                     &input[(bottom as usize * width + x)..]
                 } else {
                     zero.as_slice()
                 }),
                 &mut ctr,
                 &mut ring_buffer,
-                VertBlockOutput::None,
+                &mut VertBlockOutput::None,
             );
             n += 1;
         }
@@ -486,21 +483,21 @@ impl RecursiveGaussian {
         // Start producing output; top is still out of bounds.
         while (n as usize) < (self.radius + 1).min(height) {
             let bottom = n + self.radius as isize - 1;
-            self.vertical_block::<VECTORS>(
+            vertical_block::<VECTORS>(
                 d1_1,
                 d1_3,
                 d1_5,
                 n2_1,
                 n2_3,
                 n2_5,
-                VertBlockInput::SingleInput(if bottom < height as isize {
+                &VertBlockInput::SingleInput(if bottom < height as isize {
                     &input[(bottom as usize * width + x)..]
                 } else {
                     zero.as_slice()
                 }),
                 &mut ctr,
                 &mut ring_buffer,
-                VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
+                &mut VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
             );
             n += 1;
         }
@@ -509,20 +506,20 @@ impl RecursiveGaussian {
         while n < (height - self.radius + 1 - V_PREFETCH_ROWS) as isize {
             let top = n - self.radius as isize - 1;
             let bottom = n + self.radius as isize - 1;
-            self.vertical_block::<VECTORS>(
+            vertical_block::<VECTORS>(
                 d1_1,
                 d1_3,
                 d1_5,
                 n2_1,
                 n2_3,
                 n2_5,
-                VertBlockInput::TwoInputs((
+                &VertBlockInput::TwoInputs((
                     &input[(top as usize * width + x)..],
                     &input[(bottom as usize * width + x)..],
                 )),
                 &mut ctr,
                 &mut ring_buffer,
-                VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
+                &mut VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
             );
             // TODO: Use https://doc.rust-lang.org/std/intrinsics/fn.prefetch_read_data.html when stabilized
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -555,14 +552,14 @@ impl RecursiveGaussian {
         while (n as usize) < height {
             let top = n - self.radius as isize - 1;
             let bottom = n + self.radius as isize - 1;
-            self.vertical_block::<VECTORS>(
+            vertical_block::<VECTORS>(
                 d1_1,
                 d1_3,
                 d1_5,
                 n2_1,
                 n2_3,
                 n2_5,
-                VertBlockInput::TwoInputs((
+                &VertBlockInput::TwoInputs((
                     &input[(top as usize * width + x)..],
                     if (bottom as usize) < height {
                         &input[(bottom as usize * width + x)..]
@@ -572,30 +569,10 @@ impl RecursiveGaussian {
                 )),
                 &mut ctr,
                 &mut ring_buffer,
-                VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
+                &mut VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
             );
             n += 1;
         }
-    }
-
-    // Block := kVectors consecutive full vectors (one cache line except on the
-    // right boundary, where we can only rely on having one vector). Unrolling to
-    // the cache line size improves cache utilization.
-    #[allow(clippy::too_many_arguments)]
-    fn vertical_block<const VECTORS: usize>(
-        &self,
-        d1_1: f32x4,
-        d1_3: f32x4,
-        d1_5: f32x4,
-        n2_1: f32x4,
-        n2_3: f32x4,
-        n2_5: f32x4,
-        input: VertBlockInput,
-        ctr: &mut usize,
-        ring_buffer: &mut Aligned<A16, [f32; 3 * V_TOTAL_LANES * V_MOD]>,
-        output: VertBlockOutput,
-    ) {
-        todo!()
     }
 }
 
@@ -618,12 +595,96 @@ fn shift_left_lanes<const LANES: usize>(data: f32x4) -> f32x4 {
     f32x4::from(output)
 }
 
+// Block := `VECTORS` consecutive full vectors (one cache line except on the
+// right boundary, where we can only rely on having one vector). Unrolling to
+// the cache line size improves cache utilization.
+#[allow(clippy::too_many_arguments)]
+fn vertical_block<const VECTORS: usize>(
+    d1_1: f32x4,
+    d1_3: f32x4,
+    d1_5: f32x4,
+    n2_1: f32x4,
+    n2_3: f32x4,
+    n2_5: f32x4,
+    input: &VertBlockInput,
+    ctr: &mut usize,
+    ring_buffer: &mut Aligned<A16, [f32; 3 * V_TOTAL_LANES * V_MOD]>,
+    output: &mut VertBlockOutput,
+) {
+    let mut ring_chunks = ring_buffer.chunks_exact_mut(V_TOTAL_LANES * V_MOD);
+    let y_1 = ring_chunks.next().expect("there are 3 chunks");
+    let y_3 = ring_chunks.next().expect("there are 3 chunks");
+    let y_5 = ring_chunks.next().expect("there are 3 chunks");
+
+    *ctr += 1;
+    let n_0 = *ctr % V_MOD;
+    let n_1 = (*ctr - 1) % V_MOD;
+    let n_2 = (*ctr - 2) % V_MOD;
+
+    for idx_vec in 0..VECTORS {
+        let sum = input.get(idx_vec * V_MAX_LANES);
+
+        let y_n1_1 = &y_1[(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES)..];
+        let y_n1_1 = f32x4::from([y_n1_1[0], y_n1_1[1], y_n1_1[2], y_n1_1[3]]);
+        let y_n1_3 = &y_3[(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES)..];
+        let y_n1_3 = f32x4::from([y_n1_3[0], y_n1_3[1], y_n1_3[2], y_n1_3[3]]);
+        let y_n1_5 = &y_5[(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES)..];
+        let y_n1_5 = f32x4::from([y_n1_5[0], y_n1_5[1], y_n1_5[2], y_n1_5[3]]);
+        let y_n2_1 = &y_1[(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES)..];
+        let y_n2_1 = f32x4::from([y_n2_1[0], y_n2_1[1], y_n2_1[2], y_n2_1[3]]);
+        let y_n2_3 = &y_3[(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES)..];
+        let y_n2_3 = f32x4::from([y_n2_3[0], y_n2_3[1], y_n2_3[2], y_n2_3[3]]);
+        let y_n2_5 = &y_5[(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES)..];
+        let y_n2_5 = f32x4::from([y_n2_5[0], y_n2_5[1], y_n2_5[2], y_n2_5[3]]);
+
+        // (35)
+        let y1 = n2_1.mul_add(sum, d1_1.mul_neg_sub(y_n1_1, y_n2_1));
+        let y3 = n2_3.mul_add(sum, d1_3.mul_neg_sub(y_n1_3, y_n2_3));
+        let y5 = n2_5.mul_add(sum, d1_5.mul_neg_sub(y_n1_5, y_n2_5));
+        y_1[(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)..][..4].copy_from_slice(&y1.to_array());
+        y_3[(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)..][..4].copy_from_slice(&y3.to_array());
+        y_5[(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)..][..4].copy_from_slice(&y5.to_array());
+        output.write(y1 + y3 + y5, idx_vec * V_MAX_LANES);
+    }
+    // NOTE: flushing cache line out_pos hurts performance - less so with
+    // clflushopt than clflush but still a significant slowdown.
+}
+
 enum VertBlockInput<'a> {
     SingleInput(&'a [f32]),
     TwoInputs((&'a [f32], &'a [f32])),
 }
 
+impl<'a> VertBlockInput<'a> {
+    pub fn get(&self, index: usize) -> f32x4 {
+        match *self {
+            Self::SingleInput(input) => {
+                let input = &input[index..][..4];
+                f32x4::from([input[0], input[1], input[2], input[3]])
+            }
+            Self::TwoInputs((input1, input2)) => {
+                let input1 = &input1[index..][..4];
+                let input2 = &input2[index..][..4];
+                let input1 = f32x4::from([input1[0], input1[1], input1[2], input1[3]]);
+                let input2 = f32x4::from([input2[0], input2[1], input2[2], input2[3]]);
+                input1 + input2
+            }
+        }
+    }
+}
+
 enum VertBlockOutput<'a> {
     None,
     Store(&'a mut [f32]),
+}
+
+impl<'a> VertBlockOutput<'a> {
+    pub fn write(&mut self, data: f32x4, index: usize) {
+        match *self {
+            Self::None => (),
+            Self::Store(ref mut output) => {
+                output[index..][..4].copy_from_slice(&data.to_array());
+            }
+        }
+    }
 }
