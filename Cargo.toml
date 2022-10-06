@@ -6,6 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+aligned = "0.4.1"
 anyhow = "1.0.0"
 nalgebra = "0.31.1"
-yuvxyb = { version = "0.0.4", path = "../yuvxyb" }
+num-traits = "0.2.15"
+# wide = "0.7.4"
+wide = { git = "https://github.com/shssoichiro/wide", branch = "inline-casts" }
+yuvxyb = "0.0.5"
