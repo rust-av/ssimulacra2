@@ -1,9 +1,12 @@
-use std::{f64::consts::PI, mem::size_of};
+use std::{
+    f64::consts::PI,
+    mem::{size_of, transmute},
+};
 
 use aligned::{Aligned, A16};
 use nalgebra::base::{Matrix3, Matrix3x1};
 use num_traits::PrimInt;
-use wide::f32x4;
+use wide::{f32x4, u8x16};
 
 pub struct Blur {
     kernel: RecursiveGaussian,
@@ -608,7 +611,11 @@ fn div_ceil<T: PrimInt>(a: T, b: T) -> T {
 
 #[inline(always)]
 fn shift_left_lanes<const LANES: usize>(data: f32x4) -> f32x4 {
-    todo!()
+    assert!(LANES <= 4);
+
+    let mut output = [0f32; 4];
+    output[..(4 - LANES)].copy_from_slice(&data.to_array()[LANES..]);
+    f32x4::from(output)
 }
 
 enum VertBlockInput<'a> {
