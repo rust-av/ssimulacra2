@@ -1,4 +1,4 @@
-use std::f64::consts::PI;
+use std::{f64::consts::PI, mem::size_of};
 
 use aligned::{Aligned, A16};
 use nalgebra::base::{Matrix3, Matrix3x1};
@@ -40,10 +40,18 @@ impl Blur {
         let mut out = vec![0f32; self.width * self.height];
         self.kernel
             .fast_gaussian_horizontal(plane, &mut self.temp, self.width, self.height);
-        self.kernel.fast_gaussian_vertical(&self.temp, &mut out);
+        self.kernel
+            .fast_gaussian_vertical(&self.temp, &mut out, self.width, self.height);
         out
     }
 }
+
+const V_CACHE_LINE_LANES: usize = 64 / size_of::<f32>();
+const V_MAX_LANES: usize = 4;
+const V_CACHE_LINE_VECTORS: usize = V_CACHE_LINE_LANES / V_MAX_LANES;
+const V_TOTAL_LANES: usize = V_CACHE_LINE_VECTORS * V_MAX_LANES;
+const V_MOD: usize = 4;
+const V_PREFETCH_ROWS: usize = 8;
 
 /// Implements "Recursive Implementation of the Gaussian Filter Using Truncated
 /// Cosine Functions" by Charalampidis [2016].
@@ -402,10 +410,189 @@ impl RecursiveGaussian {
         }
     }
 
-    pub fn fast_gaussian_vertical(&self, input: &[f32], output: &mut [f32]) {
+    // Apply 1D vertical scan to multiple columns (one per vector lane).
+    pub fn fast_gaussian_vertical(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        width: usize,
+        height: usize,
+    ) {
         assert_eq!(input.len(), output.len());
 
-        todo!();
+        let mut x = 0;
+        while x + V_TOTAL_LANES <= width {
+            self.vertical_strip::<V_CACHE_LINE_VECTORS>(input, x, output, width, height);
+            x += V_TOTAL_LANES;
+        }
+        while x < width {
+            self.vertical_strip::<1>(input, x, output, width, height);
+            x += V_MAX_LANES;
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn vertical_strip<const VECTORS: usize>(
+        &self,
+        input: &[f32],
+        x: usize,
+        output: &mut [f32],
+        width: usize,
+        height: usize,
+    ) {
+        // We're iterating vertically, so use multiple full-length vectors (each
+        // lane is one column of row n).
+        //
+        // More cache-friendly to process an entirely cache line at a time
+        let d1_1 = f32x4::from([self.d1[0], self.d1[1], self.d1[2], self.d1[3]]);
+        let d1_3 = f32x4::from([self.d1[4], self.d1[5], self.d1[6], self.d1[7]]);
+        let d1_5 = f32x4::from([self.d1[8], self.d1[9], self.d1[10], self.d1[11]]);
+        let n2_1 = f32x4::from([self.n2[0], self.n2[1], self.n2[2], self.n2[3]]);
+        let n2_3 = f32x4::from([self.n2[4], self.n2[5], self.n2[6], self.n2[7]]);
+        let n2_5 = f32x4::from([self.n2[8], self.n2[9], self.n2[10], self.n2[11]]);
+
+        let mut ctr = 0usize;
+        let mut ring_buffer: Aligned<A16, _> = Aligned([0f32; 3 * V_TOTAL_LANES * V_MOD]);
+        let zero: Aligned<A16, _> = Aligned([0f32; V_TOTAL_LANES]);
+
+        // Warmup: top is out of bounds (zero padded), bottom is usually
+        // in-bounds.
+        let mut n = -(self.radius as isize) + 1;
+        while n < 0 {
+            // bottom is always non-negative since n is initialized in -N + 1.
+            let bottom = n + self.radius as isize - 1;
+            self.vertical_block::<VECTORS>(
+                d1_1,
+                d1_3,
+                d1_5,
+                n2_1,
+                n2_3,
+                n2_5,
+                VertBlockInput::SingleInput(if bottom < height as isize {
+                    &input[(bottom as usize * width + x)..]
+                } else {
+                    zero.as_slice()
+                }),
+                &mut ctr,
+                &mut ring_buffer,
+                VertBlockOutput::None,
+            );
+            n += 1;
+        }
+
+        // Start producing output; top is still out of bounds.
+        while (n as usize) < (self.radius + 1).min(height) {
+            let bottom = n + self.radius as isize - 1;
+            self.vertical_block::<VECTORS>(
+                d1_1,
+                d1_3,
+                d1_5,
+                n2_1,
+                n2_3,
+                n2_5,
+                VertBlockInput::SingleInput(if bottom < height as isize {
+                    &input[(bottom as usize * width + x)..]
+                } else {
+                    zero.as_slice()
+                }),
+                &mut ctr,
+                &mut ring_buffer,
+                VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
+            );
+            n += 1;
+        }
+
+        // Interior outputs with prefetching and without bounds checks.
+        while n < (height - self.radius + 1 - V_PREFETCH_ROWS) as isize {
+            let top = n - self.radius as isize - 1;
+            let bottom = n + self.radius as isize - 1;
+            self.vertical_block::<VECTORS>(
+                d1_1,
+                d1_3,
+                d1_5,
+                n2_1,
+                n2_3,
+                n2_5,
+                VertBlockInput::TwoInputs((
+                    &input[(top as usize * width + x)..],
+                    &input[(bottom as usize * width + x)..],
+                )),
+                &mut ctr,
+                &mut ring_buffer,
+                VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
+            );
+            // TODO: Use https://doc.rust-lang.org/std/intrinsics/fn.prefetch_read_data.html when stabilized
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                #[cfg(target_arch = "x86")]
+                use core::arch::x86::{_mm_prefetch, _MM_HINT_T0};
+                #[cfg(target_arch = "x86_64")]
+                use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+
+                // SAFETY: We checked the target arch before calling this
+                unsafe {
+                    _mm_prefetch(
+                        input[((top as usize + V_PREFETCH_ROWS) * width + x)..]
+                            .as_ptr()
+                            .cast(),
+                        _MM_HINT_T0,
+                    );
+                    _mm_prefetch(
+                        input[((bottom as usize + V_PREFETCH_ROWS) * width + x)..]
+                            .as_ptr()
+                            .cast(),
+                        _MM_HINT_T0,
+                    );
+                }
+            }
+            n += 1;
+        }
+
+        // Bottom border without prefetching and with bounds checks.
+        while (n as usize) < height {
+            let top = n - self.radius as isize - 1;
+            let bottom = n + self.radius as isize - 1;
+            self.vertical_block::<VECTORS>(
+                d1_1,
+                d1_3,
+                d1_5,
+                n2_1,
+                n2_3,
+                n2_5,
+                VertBlockInput::TwoInputs((
+                    &input[(top as usize * width + x)..],
+                    if (bottom as usize) < height {
+                        &input[(bottom as usize * width + x)..]
+                    } else {
+                        zero.as_slice()
+                    },
+                )),
+                &mut ctr,
+                &mut ring_buffer,
+                VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
+            );
+            n += 1;
+        }
+    }
+
+    // Block := kVectors consecutive full vectors (one cache line except on the
+    // right boundary, where we can only rely on having one vector). Unrolling to
+    // the cache line size improves cache utilization.
+    #[allow(clippy::too_many_arguments)]
+    fn vertical_block<const VECTORS: usize>(
+        &self,
+        d1_1: f32x4,
+        d1_3: f32x4,
+        d1_5: f32x4,
+        n2_1: f32x4,
+        n2_3: f32x4,
+        n2_5: f32x4,
+        input: VertBlockInput,
+        ctr: &mut usize,
+        ring_buffer: &mut Aligned<A16, [f32; 3 * V_TOTAL_LANES * V_MOD]>,
+        output: VertBlockOutput,
+    ) {
+        todo!()
     }
 }
 
@@ -422,4 +609,14 @@ fn div_ceil<T: PrimInt>(a: T, b: T) -> T {
 #[inline(always)]
 fn shift_left_lanes<const LANES: usize>(data: f32x4) -> f32x4 {
     todo!()
+}
+
+enum VertBlockInput<'a> {
+    SingleInput(&'a [f32]),
+    TwoInputs((&'a [f32], &'a [f32])),
+}
+
+enum VertBlockOutput<'a> {
+    None,
+    Store(&'a mut [f32]),
 }
