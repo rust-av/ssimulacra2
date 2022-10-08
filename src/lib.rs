@@ -55,9 +55,13 @@ const NUM_SCALES: usize = 6;
 /// - If the source and distorted image width and height do not match
 /// - If the source or distorted image cannot be converted to XYB successfully
 /// - If the image is smaller than 8x8 pixels
-pub fn compute_frame_ssimulacra2<T: Pixel>(source: &Yuv<T>, distorted: &Yuv<T>) -> Result<f64> {
-    let mut img1: Xyb = source.try_into()?;
-    let mut img2: Xyb = distorted.try_into()?;
+pub fn compute_frame_ssimulacra2<T: TryInto<Xyb>>(source: T, distorted: T) -> Result<f64> {
+    let mut img1: Xyb = source
+        .try_into()
+        .map_err(|_e| anyhow::anyhow!("Failed to convert to XYB"))?;
+    let mut img2: Xyb = distorted
+        .try_into()
+        .map_err(|_e| anyhow::anyhow!("Failed to convert to XYB"))?;
 
     if img1.width() != img2.width() || img1.height() != img2.height() {
         bail!("Source and distorted image width and height must be equal");

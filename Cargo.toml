@@ -15,7 +15,7 @@ anyhow = "1.0.0"
 nalgebra = "0.31.1"
 num-traits = "0.2.15"
 wide = "0.7.5"
-yuvxyb = "0.0.5"
+yuvxyb = "0.0.6"
 
 [dev-dependencies]
 criterion = "0.4.0"

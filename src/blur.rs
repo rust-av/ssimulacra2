@@ -15,7 +15,7 @@ pub struct Blur {
 impl Blur {
     pub fn new(width: usize, height: usize) -> Self {
         Blur {
-            kernel: RecursiveGaussian::new(1.5),
+            kernel: RecursiveGaussian::new(),
             temp: vec![0.0f32; width * height],
             width,
             height,
@@ -74,9 +74,11 @@ struct RecursiveGaussian {
 }
 
 impl RecursiveGaussian {
-    pub fn new(sigma: f64) -> Self {
+    pub fn new() -> Self {
+        const SIGMA: f64 = 1.5f64;
+
         // (57), "N"
-        let radius = 3.2795f64.mul_add(sigma, 0.2546);
+        let radius = 3.2795f64.mul_add(SIGMA, 0.2546).round();
 
         // Table I, first row
         let pi_div_2r = PI / (2.0f64 * radius);
@@ -93,7 +95,7 @@ impl RecursiveGaussian {
         let r_5 = p_5 * p_5 / omega[2].sin();
 
         // (50), k={1,3,5}
-        let neg_half_sigma2 = -0.5f64 * sigma * sigma;
+        let neg_half_sigma2 = -0.5f64 * SIGMA * SIGMA;
         let recip_radius = 1.0f64 / radius;
         let mut rho = [0.0f64; 3];
         for i in 0..3 {
@@ -111,12 +113,13 @@ impl RecursiveGaussian {
         let zeta_35 = d_51 * recip_d13;
 
         // (56)
-        let a = Matrix3::from_row_slice(&[p_1, p_3, p_5, r_1, r_3, r_5, zeta_15, zeta_35, 1.0f64]);
-        assert!(a.try_inverse().is_some());
+        let a = Matrix3::from_row_slice(&[p_1, p_3, p_5, r_1, r_3, r_5, zeta_15, zeta_35, 1.0f64])
+            .try_inverse()
+            .expect("Has inverse");
         // (55)
         let gamma = Matrix3x1::from_column_slice(&[
             1.0f64,
-            radius * radius - sigma * sigma,
+            radius * radius - SIGMA * SIGMA,
             zeta_15.mul_add(rho[0], zeta_35 * rho[1]) + rho[2],
         ]);
         // (53)
@@ -503,7 +506,7 @@ impl RecursiveGaussian {
         }
 
         // Interior outputs with prefetching and without bounds checks.
-        while n < (height - self.radius + 1 - V_PREFETCH_ROWS) as isize {
+        while n < (height as isize - self.radius as isize + 1 - V_PREFETCH_ROWS as isize) {
             let top = n - self.radius as isize - 1;
             let bottom = n + self.radius as isize - 1;
             vertical_block::<VECTORS>(
@@ -619,7 +622,7 @@ fn vertical_block<const VECTORS: usize>(
     *ctr += 1;
     let n_0 = *ctr % V_MOD;
     let n_1 = (*ctr - 1) % V_MOD;
-    let n_2 = (*ctr - 2) % V_MOD;
+    let n_2 = ctr.saturating_sub(2) % V_MOD;
 
     for idx_vec in 0..VECTORS {
         let sum = input.get(idx_vec * V_MAX_LANES);
@@ -659,15 +662,22 @@ impl<'a> VertBlockInput<'a> {
     pub fn get(&self, index: usize) -> f32x4 {
         match *self {
             Self::SingleInput(input) => {
-                let input = &input[index..][..4];
-                f32x4::from([input[0], input[1], input[2], input[3]])
+                let input = &input[index..];
+                let mut data = [0f32; 4];
+                let rem = input.len().min(4);
+                data[..rem].copy_from_slice(&input[..rem]);
+                f32x4::from(data)
             }
             Self::TwoInputs((input1, input2)) => {
-                let input1 = &input1[index..][..4];
-                let input2 = &input2[index..][..4];
-                let input1 = f32x4::from([input1[0], input1[1], input1[2], input1[3]]);
-                let input2 = f32x4::from([input2[0], input2[1], input2[2], input2[3]]);
-                input1 + input2
+                let input1 = &input1[index..];
+                let input2 = &input2[index..];
+                let mut data1 = [0f32; 4];
+                let mut data2 = [0f32; 4];
+                let rem1 = input1.len().min(4);
+                data1[..rem1].copy_from_slice(&input1[..rem1]);
+                let rem2 = input2.len().min(4);
+                data2[..rem2].copy_from_slice(&input2[..rem2]);
+                f32x4::from(data1) + f32x4::from(data2)
             }
         }
     }
@@ -683,7 +693,9 @@ impl<'a> VertBlockOutput<'a> {
         match *self {
             Self::None => (),
             Self::Store(ref mut output) => {
-                output[index..][..4].copy_from_slice(&data.to_array());
+                let output = &mut output[index..];
+                let rem = output.len().min(4);
+                output[..rem].copy_from_slice(&data.to_array()[..rem]);
             }
         }
     }

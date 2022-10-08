@@ -72,7 +72,7 @@ fn distort_yuv(input: &Yuv<u8>) -> Yuv<u8> {
     ];
     for plane in &mut planes {
         for pix in plane.data_origin_mut() {
-            *pix = clamp((*pix) as i16 + rng.gen_range(-16..=16), 0, 255) as u8;
+            *pix = clamp(i16::from(*pix) + rng.gen_range(-16..=16), 0, 255) as u8;
         }
     }
     let data: Frame<u8> = Frame { planes };
