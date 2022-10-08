@@ -44,6 +44,7 @@ mod blur;
 use anyhow::{bail, Result};
 use blur::Blur;
 pub use yuvxyb::{CastFromPrimitive, Frame, Pixel, Plane, Xyb, Yuv};
+pub use yuvxyb::{ColorPrimaries, MatrixCoefficients, TransferCharacteristic, YuvConfig};
 
 const NUM_SCALES: usize = 6;
 
@@ -434,5 +435,92 @@ impl Msssim {
         }
 
         ssim
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::Rng;
+    use yuvxyb::{ColorPrimaries, MatrixCoefficients, TransferCharacteristic, YuvConfig};
+
+    use super::*;
+
+    #[test]
+    fn test_ssimulacra2() {
+        // TODO: Improve this test. For now it only verifies that we can run the metric.
+        let source = make_yuv(
+            (0, 0),
+            false,
+            MatrixCoefficients::BT709,
+            TransferCharacteristic::BT1886,
+            ColorPrimaries::BT709,
+        );
+        let distorted = make_yuv(
+            (0, 0),
+            false,
+            MatrixCoefficients::BT709,
+            TransferCharacteristic::BT1886,
+            ColorPrimaries::BT709,
+        );
+        let result = compute_frame_ssimulacra2(&source, &distorted).unwrap();
+        assert!(result >= 0.0f64);
+        assert!(result <= 100.0f64);
+    }
+
+    fn make_yuv(
+        ss: (u8, u8),
+        full_range: bool,
+        mc: MatrixCoefficients,
+        tc: TransferCharacteristic,
+        cp: ColorPrimaries,
+    ) -> Yuv<u8> {
+        let y_dims = (320usize, 240usize);
+        let uv_dims = (y_dims.0 >> ss.0, y_dims.1 >> ss.1);
+        let mut data: Frame<u8> = Frame {
+            planes: [
+                Plane::new(y_dims.0, y_dims.1, 0, 0, 0, 0),
+                Plane::new(
+                    uv_dims.0,
+                    uv_dims.1,
+                    usize::from(ss.0),
+                    usize::from(ss.1),
+                    0,
+                    0,
+                ),
+                Plane::new(
+                    uv_dims.0,
+                    uv_dims.1,
+                    usize::from(ss.0),
+                    usize::from(ss.1),
+                    0,
+                    0,
+                ),
+            ],
+        };
+        let mut rng = rand::thread_rng();
+        for (i, plane) in data.planes.iter_mut().enumerate() {
+            for val in plane.data_origin_mut().iter_mut() {
+                *val = rng.gen_range(if full_range {
+                    0..=255
+                } else if i == 0 {
+                    16..=235
+                } else {
+                    16..=240
+                });
+            }
+        }
+        Yuv::new(
+            data,
+            YuvConfig {
+                bit_depth: 8,
+                subsampling_x: ss.0,
+                subsampling_y: ss.1,
+                full_range,
+                matrix_coefficients: mc,
+                transfer_characteristics: tc,
+                color_primaries: cp,
+            },
+        )
+        .unwrap()
     }
 }

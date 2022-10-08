@@ -14,6 +14,13 @@ aligned = "0.4.1"
 anyhow = "1.0.0"
 nalgebra = "0.31.1"
 num-traits = "0.2.15"
-# wide = "0.7.4"
-wide = { git = "https://github.com/shssoichiro/wide", branch = "inline-casts" }
+wide = "0.7.5"
 yuvxyb = "0.0.5"
+
+[dev-dependencies]
+criterion = "0.4.0"
+rand = "0.8.5"
+
+[[bench]]
+name = "benches"
+harness = false
