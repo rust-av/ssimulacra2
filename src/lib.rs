@@ -55,7 +55,10 @@ const NUM_SCALES: usize = 6;
 /// - If the source and distorted image width and height do not match
 /// - If the source or distorted image cannot be converted to XYB successfully
 /// - If the image is smaller than 8x8 pixels
-pub fn compute_frame_ssimulacra2<T: TryInto<Xyb>>(source: T, distorted: T) -> Result<f64> {
+pub fn compute_frame_ssimulacra2<T: TryInto<Xyb>, U: TryInto<Xyb>>(
+    source: T,
+    distorted: U,
+) -> Result<f64> {
     let mut img1: Xyb = source
         .try_into()
         .map_err(|_e| anyhow::anyhow!("Failed to convert to XYB"))?;
@@ -444,87 +447,50 @@ impl Msssim {
 
 #[cfg(test)]
 mod tests {
-    use rand::Rng;
-    use yuvxyb::{ColorPrimaries, MatrixCoefficients, TransferCharacteristic, YuvConfig};
+    use std::{
+        fs::File,
+        path::{Path, PathBuf},
+    };
 
     use super::*;
+    use pxm::PFM;
 
     #[test]
     fn test_ssimulacra2() {
         // TODO: Improve this test. For now it only verifies that we can run the metric.
-        let source = make_yuv(
-            (0, 0),
-            false,
-            MatrixCoefficients::BT709,
-            TransferCharacteristic::BT1886,
-            ColorPrimaries::BT709,
+        let source = load_from_pfm(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("test_data")
+                .join("tank_source.pfm"),
         );
-        let distorted = make_yuv(
-            (0, 0),
-            false,
-            MatrixCoefficients::BT709,
-            TransferCharacteristic::BT1886,
-            ColorPrimaries::BT709,
+        let distorted = load_from_pfm(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("test_data")
+                .join("tank_distorted.pfm"),
         );
-        let result = compute_frame_ssimulacra2(&source, &distorted).unwrap();
-        assert!(result >= 0.0f64);
-        assert!(result <= 100.0f64);
+        let source_data = source
+            .data
+            .chunks_exact(3)
+            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+            .collect::<Vec<_>>();
+        let source_data = Xyb::new(source_data, source.width, source.height).unwrap();
+        let distorted_data = distorted
+            .data
+            .chunks_exact(3)
+            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+            .collect::<Vec<_>>();
+        let distorted_data = Xyb::new(distorted_data, distorted.width, distorted.height).unwrap();
+        let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
+        let expected = 1.721_043_99_f64;
+        assert!(
+            (result - expected).abs() < 0.005f64,
+            "Result {:.6} not equal to expected {:.6}",
+            result,
+            expected
+        );
     }
 
-    fn make_yuv(
-        ss: (u8, u8),
-        full_range: bool,
-        mc: MatrixCoefficients,
-        tc: TransferCharacteristic,
-        cp: ColorPrimaries,
-    ) -> Yuv<u8> {
-        let y_dims = (320usize, 240usize);
-        let uv_dims = (y_dims.0 >> ss.0, y_dims.1 >> ss.1);
-        let mut data: Frame<u8> = Frame {
-            planes: [
-                Plane::new(y_dims.0, y_dims.1, 0, 0, 0, 0),
-                Plane::new(
-                    uv_dims.0,
-                    uv_dims.1,
-                    usize::from(ss.0),
-                    usize::from(ss.1),
-                    0,
-                    0,
-                ),
-                Plane::new(
-                    uv_dims.0,
-                    uv_dims.1,
-                    usize::from(ss.0),
-                    usize::from(ss.1),
-                    0,
-                    0,
-                ),
-            ],
-        };
-        let mut rng = rand::thread_rng();
-        for (i, plane) in data.planes.iter_mut().enumerate() {
-            for val in plane.data_origin_mut().iter_mut() {
-                *val = rng.gen_range(if full_range {
-                    0..=255
-                } else if i == 0 {
-                    16..=235
-                } else {
-                    16..=240
-                });
-            }
-        }
-        Yuv::new(
-            data,
-            YuvConfig {
-                bit_depth: 8,
-                subsampling_x: ss.0,
-                subsampling_y: ss.1,
-                full_range,
-                matrix_coefficients: mc,
-                transfer_characteristics: tc,
-                color_primaries: cp,
-            },
-        )
-        .unwrap()
+    fn load_from_pfm(path: &Path) -> PFM {
+        PFM::read_from(&mut File::open(path).unwrap()).unwrap()
     }
 }
