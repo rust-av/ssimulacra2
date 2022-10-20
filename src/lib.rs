@@ -187,9 +187,9 @@ fn downscale_by_2(
                 let mut sum = 0f32;
                 for iy in 0..SCALE {
                     for ix in 0..SCALE {
-                        let x = (ox * SCALE + ix).min(in_h - 1);
+                        let x = (ox * SCALE + ix).min(in_w - 1);
                         let y = (oy * SCALE + iy).min(in_h - 1);
-                        let in_pix = in_plane[y * in_h + x];
+                        let in_pix = in_plane[y * in_w + x];
 
                         sum += in_pix;
                     }
