@@ -278,7 +278,7 @@ fn edge_diff_map(
                 let artifact = d1.max(0.0);
                 sum1[0] += artifact;
                 sum1[1] += artifact.powi(4);
-                let detail_lost = -d1.max(0.0);
+                let detail_lost = (-d1).max(0.0);
                 sum1[2] += detail_lost;
                 sum1[3] += detail_lost.powi(4);
             }
@@ -447,39 +447,57 @@ impl Msssim {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs::File,
-        path::{Path, PathBuf},
-    };
+    use std::path::PathBuf;
 
     use super::*;
-    use pxm::PFM;
+    use yuvxyb::Rgb;
 
     #[test]
     fn test_ssimulacra2() {
-        // TODO: Improve this test. For now it only verifies that we can run the metric.
-        let source = load_from_pfm(
+        let source = image::open(
             &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("test_data")
-                .join("tank_source.pfm"),
-        );
-        let distorted = load_from_pfm(
+                .join("tank_source.png"),
+        )
+        .unwrap();
+        let distorted = image::open(
             &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("test_data")
-                .join("tank_distorted.pfm"),
-        );
+                .join("tank_distorted.png"),
+        )
+        .unwrap();
         let source_data = source
-            .data
+            .to_rgb32f()
             .chunks_exact(3)
             .map(|chunk| [chunk[0], chunk[1], chunk[2]])
             .collect::<Vec<_>>();
-        let source_data = Xyb::new(source_data, source.width, source.height).unwrap();
+        let source_data = Xyb::try_from(
+            Rgb::new(
+                source_data,
+                source.width() as usize,
+                source.height() as usize,
+                TransferCharacteristic::SRGB,
+                ColorPrimaries::BT709,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let distorted_data = distorted
-            .data
+            .to_rgb32f()
             .chunks_exact(3)
             .map(|chunk| [chunk[0], chunk[1], chunk[2]])
             .collect::<Vec<_>>();
-        let distorted_data = Xyb::new(distorted_data, distorted.width, distorted.height).unwrap();
+        let distorted_data = Xyb::try_from(
+            Rgb::new(
+                distorted_data,
+                distorted.width() as usize,
+                distorted.height() as usize,
+                TransferCharacteristic::SRGB,
+                ColorPrimaries::BT709,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
         let expected = 1.721_043_99_f64;
         assert!(
@@ -488,9 +506,5 @@ mod tests {
             result,
             expected
         );
-    }
-
-    fn load_from_pfm(path: &Path) -> PFM {
-        PFM::read_from(&mut File::open(path).unwrap()).unwrap()
     }
 }
