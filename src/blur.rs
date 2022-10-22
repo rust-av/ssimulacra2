@@ -1,10 +1,9 @@
-use std::f64::consts::PI;
+use std::{f64::consts::PI, mem::size_of};
 
 use aligned::{Aligned, A16};
 use nalgebra::base::{Matrix3, Matrix3x1};
-
-const VERTICAL_MOD: usize = 4;
-const VERTICAL_PREFETCH_ROWS: usize = 8;
+use num_traits::PrimInt;
+use wide::f32x4;
 
 pub struct Blur {
     kernel: RecursiveGaussian,
@@ -40,12 +39,19 @@ impl Blur {
     fn blur_plane(&mut self, plane: &[f32]) -> Vec<f32> {
         let mut out = vec![0f32; self.width * self.height];
         self.kernel
-            .fast_gaussian_horizontal(plane, &mut self.temp, self.width);
+            .fast_gaussian_horizontal(plane, &mut self.temp, self.width, self.height);
         self.kernel
             .fast_gaussian_vertical(&self.temp, &mut out, self.width, self.height);
         out
     }
 }
+
+const V_CACHE_LINE_LANES: usize = 64 / size_of::<f32>();
+const V_MAX_LANES: usize = 4;
+const V_CACHE_LINE_VECTORS: usize = V_CACHE_LINE_LANES / V_MAX_LANES;
+const V_TOTAL_LANES: usize = V_CACHE_LINE_VECTORS * V_MAX_LANES;
+const V_MOD: usize = 4;
+const V_PREFETCH_ROWS: usize = 8;
 
 /// Implements "Recursive Implementation of the Gaussian Filter Using Truncated
 /// Cosine Functions" by Charalampidis [2016].
@@ -177,67 +183,233 @@ impl RecursiveGaussian {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub fn fast_gaussian_horizontal(&self, input: &[f32], output: &mut [f32], width: usize) {
+    pub fn fast_gaussian_horizontal(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        width: usize,
+        height: usize,
+    ) {
         assert_eq!(input.len(), output.len());
 
-        let mul_in_1 = self.mul_in[0];
-        let mul_in_3 = self.mul_in[1];
-        let mul_in_5 = self.mul_in[2];
-        let mul_prev_1 = self.mul_prev[0];
-        let mul_prev_3 = self.mul_prev[1];
-        let mul_prev_5 = self.mul_prev[2];
-        let mul_prev2_1 = self.mul_prev2[0];
-        let mul_prev2_3 = self.mul_prev2[1];
-        let mul_prev2_5 = self.mul_prev2[2];
+        let radius = self.radius as isize;
+        for y in 0..height {
+            let input = &input[(y * width)..][..width];
+            let output = &mut output[(y * width)..][..width];
 
-        let mut prev_1 = 0f32;
-        let mut prev_3 = 0f32;
-        let mut prev_5 = 0f32;
-        let mut prev2_1 = 0f32;
-        let mut prev2_3 = 0f32;
-        let mut prev2_5 = 0f32;
+            // Although the current output depends on the previous output, we can unroll
+            // up to 4x by precomputing up to fourth powers of the constants. Beyond that,
+            // numerical precision might become a problem.
+            //
+            // Rust optimization: Casting from a slice requires a match statement to know
+            // the length of the input by the `wide` crate. Using a static size array allows
+            // a direct cast.
+            let mul_in_1 = f32x4::from([
+                self.mul_in[0],
+                self.mul_in[1],
+                self.mul_in[2],
+                self.mul_in[3],
+            ]);
+            let mul_in_3 = f32x4::from([
+                self.mul_in[4],
+                self.mul_in[5],
+                self.mul_in[6],
+                self.mul_in[7],
+            ]);
+            let mul_in_5 = f32x4::from([
+                self.mul_in[8],
+                self.mul_in[9],
+                self.mul_in[10],
+                self.mul_in[11],
+            ]);
+            let mul_prev_1 = f32x4::from([
+                self.mul_prev[0],
+                self.mul_prev[1],
+                self.mul_prev[2],
+                self.mul_prev[3],
+            ]);
+            let mul_prev_3 = f32x4::from([
+                self.mul_prev[4],
+                self.mul_prev[5],
+                self.mul_prev[6],
+                self.mul_prev[7],
+            ]);
+            let mul_prev_5 = f32x4::from([
+                self.mul_prev[8],
+                self.mul_prev[9],
+                self.mul_prev[10],
+                self.mul_prev[11],
+            ]);
+            let mul_prev2_1 = f32x4::from([
+                self.mul_prev2[0],
+                self.mul_prev2[1],
+                self.mul_prev2[2],
+                self.mul_prev2[3],
+            ]);
+            let mul_prev2_3 = f32x4::from([
+                self.mul_prev2[4],
+                self.mul_prev2[5],
+                self.mul_prev2[6],
+                self.mul_prev2[7],
+            ]);
+            let mul_prev2_5 = f32x4::from([
+                self.mul_prev2[8],
+                self.mul_prev2[9],
+                self.mul_prev2[10],
+                self.mul_prev2[11],
+            ]);
+            let mut prev_1 = f32x4::ZERO;
+            let mut prev_3 = f32x4::ZERO;
+            let mut prev_5 = f32x4::ZERO;
+            let mut prev2_1 = f32x4::ZERO;
+            let mut prev2_3 = f32x4::ZERO;
+            let mut prev2_5 = f32x4::ZERO;
 
-        let big_n = self.radius as isize;
-        let mut small_n = (-big_n) + 1;
+            let mut n = -radius + 1;
+            // Left side with bounds checks and only write output after n >= 0.
+            let first_aligned = round_up_to(radius, 4);
+            while n < (first_aligned.min(width as isize)) {
+                let left = n - radius - 1;
+                let right = n + radius - 1;
+                let left_val = if left >= 0 {
+                    input[left as usize]
+                } else {
+                    0f32
+                };
+                let right_val = if right < width as isize {
+                    input[right as usize]
+                } else {
+                    0f32
+                };
+                let sum = left_val + right_val;
+                let sum = f32x4::from([sum; 4]);
 
-        while small_n < width as isize {
-            let left = small_n - big_n - 1;
-            let right = small_n + big_n - 1;
-            let left_val = if left >= 0 {
-                input[left as usize]
-            } else {
-                0f32
-            };
-            let right_val = if right < width as isize {
-                input[right as usize]
-            } else {
-                0f32
-            };
-            let sum = left_val + right_val;
+                // (Only processing a single lane here, no need to broadcast)
+                let mut out_1 = sum * mul_in_1;
+                let mut out_3 = sum * mul_in_3;
+                let mut out_5 = sum * mul_in_5;
 
-            let mut out_1 = sum * mul_in_1;
-            let mut out_3 = sum * mul_in_3;
-            let mut out_5 = sum * mul_in_5;
+                out_1 = mul_prev2_1.mul_add(prev2_1, out_1);
+                out_3 = mul_prev2_3.mul_add(prev2_3, out_3);
+                out_5 = mul_prev2_5.mul_add(prev2_5, out_5);
+                prev2_1 = prev_1;
+                prev2_3 = prev_3;
+                prev2_5 = prev_5;
 
-            out_1 = mul_prev2_1.mul_add(prev2_1, out_1);
-            out_3 = mul_prev2_3.mul_add(prev2_3, out_3);
-            out_5 = mul_prev2_5.mul_add(prev2_5, out_5);
-            prev2_1 = prev_1;
-            prev2_3 = prev_3;
-            prev2_5 = prev_5;
+                out_1 = mul_prev_1.mul_add(prev_1, out_1);
+                out_3 = mul_prev_3.mul_add(prev_3, out_3);
+                out_5 = mul_prev_5.mul_add(prev_5, out_5);
+                prev_1 = out_1;
+                prev_3 = out_3;
+                prev_5 = out_5;
 
-            out_1 = mul_prev_1.mul_add(prev_1, out_1);
-            out_3 = mul_prev_3.mul_add(prev_3, out_3);
-            out_5 = mul_prev_5.mul_add(prev_5, out_5);
-            prev_1 = out_1;
-            prev_3 = out_3;
-            prev_5 = out_5;
+                if n >= 0 {
+                    output[n as usize] = (out_1 + out_3 + out_5).to_array()[0];
+                }
 
-            if small_n >= 0 {
-                output[small_n as usize] = out_1 + out_3 + out_5;
+                n += 1;
             }
 
-            small_n += 1;
+            // The above loop is effectively scalar but it is convenient to use the same
+            // prev/prev2 variables, so broadcast to each lane before the unrolled loop.
+            prev2_1 = f32x4::from([prev2_1.to_array()[0]; 4]);
+            prev2_3 = f32x4::from([prev2_3.to_array()[0]; 4]);
+            prev2_5 = f32x4::from([prev2_5.to_array()[0]; 4]);
+            prev_1 = f32x4::from([prev_1.to_array()[0]; 4]);
+            prev_3 = f32x4::from([prev_3.to_array()[0]; 4]);
+            prev_5 = f32x4::from([prev_5.to_array()[0]; 4]);
+
+            // Unrolled, no bounds checking needed.
+            while n < width as isize - radius + 1 - (4 - 1) {
+                let in1 = &input[(n - radius - 1) as usize..][..4];
+                let in2 = &input[(n + radius - 1) as usize..][..4];
+                let sum = f32x4::from([in1[0], in1[1], in1[2], in1[3]])
+                    + f32x4::from([in2[0], in2[1], in2[2], in2[3]]);
+
+                // To get a vector of output(s), we multiply broadcasted vectors (of each
+                // input plus the two previous outputs) and add them all together.
+                // Incremental broadcasting and shifting is expected to be cheaper than
+                // horizontal adds or transposing 4x4 values because they run on a different
+                // port, concurrently with the FMA.
+                let in0 = f32x4::from([sum.to_array()[0]; 4]);
+                let mut out_1 = in0 * mul_in_1;
+                let mut out_3 = in0 * mul_in_3;
+                let mut out_5 = in0 * mul_in_5;
+
+                let in1 = f32x4::from([sum.to_array()[1]; 4]);
+                out_1 = shift_left_lanes::<1>(mul_in_1).mul_add(in1, out_1);
+                out_3 = shift_left_lanes::<1>(mul_in_3).mul_add(in1, out_3);
+                out_5 = shift_left_lanes::<1>(mul_in_5).mul_add(in1, out_5);
+
+                let in2 = f32x4::from([sum.to_array()[2]; 4]);
+                out_1 = shift_left_lanes::<2>(mul_in_1).mul_add(in2, out_1);
+                out_3 = shift_left_lanes::<2>(mul_in_3).mul_add(in2, out_3);
+                out_5 = shift_left_lanes::<2>(mul_in_5).mul_add(in2, out_5);
+
+                let in3 = f32x4::from([sum.to_array()[3]; 4]);
+                out_1 = shift_left_lanes::<3>(mul_in_1).mul_add(in3, out_1);
+                out_3 = shift_left_lanes::<3>(mul_in_3).mul_add(in3, out_3);
+                out_5 = shift_left_lanes::<3>(mul_in_5).mul_add(in3, out_5);
+
+                out_1 = mul_prev2_1.mul_add(prev2_1, out_1);
+                out_3 = mul_prev2_3.mul_add(prev2_3, out_3);
+                out_5 = mul_prev2_5.mul_add(prev2_5, out_5);
+
+                out_1 = mul_prev_1.mul_add(prev_1, out_1);
+                out_3 = mul_prev_3.mul_add(prev_3, out_3);
+                out_5 = mul_prev_5.mul_add(prev_5, out_5);
+
+                prev2_1 = f32x4::from([out_1.to_array()[2]; 4]);
+                prev2_3 = f32x4::from([out_3.to_array()[2]; 4]);
+                prev2_5 = f32x4::from([out_5.to_array()[2]; 4]);
+                prev_1 = f32x4::from([out_1.to_array()[3]; 4]);
+                prev_3 = f32x4::from([out_3.to_array()[3]; 4]);
+                prev_5 = f32x4::from([out_5.to_array()[3]; 4]);
+
+                output[n as usize..][..4].copy_from_slice(&(out_1 + out_3 + out_5).to_array());
+
+                n += 4;
+            }
+
+            // Remainder handling with bounds checks
+            while n < width as isize {
+                let left = n - self.radius as isize - 1;
+                let right = n + self.radius as isize - 1;
+                let left_val = if left >= 0 {
+                    input[left as usize]
+                } else {
+                    0.0f32
+                };
+                let right_val = if right < width as isize {
+                    input[right as usize]
+                } else {
+                    0.0f32
+                };
+                let sum = f32x4::from([left_val + right_val; 4]);
+
+                // (Only processing a single lane here, no need to broadcast)
+                let mut out_1 = sum * mul_in_1;
+                let mut out_3 = sum * mul_in_3;
+                let mut out_5 = sum * mul_in_5;
+
+                out_1 = mul_prev2_1.mul_add(prev2_1, out_1);
+                out_3 = mul_prev2_3.mul_add(prev2_3, out_3);
+                out_5 = mul_prev2_5.mul_add(prev2_5, out_5);
+                prev2_1 = prev_1;
+                prev2_3 = prev_3;
+                prev2_5 = prev_5;
+
+                out_1 = mul_prev_1.mul_add(prev_1, out_1);
+                out_3 = mul_prev_3.mul_add(prev_3, out_3);
+                out_5 = mul_prev_5.mul_add(prev_5, out_5);
+                prev_1 = out_1;
+                prev_3 = out_3;
+                prev_5 = out_5;
+
+                output[n as usize] = (out_1 + out_3 + out_5).to_array()[0];
+
+                n += 1;
+            }
         }
     }
 
@@ -251,13 +423,19 @@ impl RecursiveGaussian {
     ) {
         assert_eq!(input.len(), output.len());
 
-        for x in 0..width {
-            self.vertical_strip(input, x, output, width, height);
+        let mut x = 0;
+        while x + V_TOTAL_LANES <= width {
+            self.vertical_strip::<V_CACHE_LINE_VECTORS>(input, x, output, width, height);
+            x += V_TOTAL_LANES;
+        }
+        while x < width {
+            self.vertical_strip::<1>(input, x, output, width, height);
+            x += V_MAX_LANES;
         }
     }
 
     #[allow(clippy::too_many_lines)]
-    fn vertical_strip(
+    fn vertical_strip<const VECTORS: usize>(
         &self,
         input: &[f32],
         x: usize,
@@ -265,111 +443,73 @@ impl RecursiveGaussian {
         width: usize,
         height: usize,
     ) {
-        let d1_1 = self.d1[0];
-        let d1_3 = self.d1[1];
-        let d1_5 = self.d1[2];
-        let n2_1 = self.n2[0];
-        let n2_3 = self.n2[1];
-        let n2_5 = self.n2[2];
+        // We're iterating vertically, so use multiple full-length vectors (each
+        // lane is one column of row n).
+        //
+        // More cache-friendly to process an entirely cache line at a time
+        let d1_1 = f32x4::from([self.d1[0], self.d1[1], self.d1[2], self.d1[3]]);
+        let d1_3 = f32x4::from([self.d1[4], self.d1[5], self.d1[6], self.d1[7]]);
+        let d1_5 = f32x4::from([self.d1[8], self.d1[9], self.d1[10], self.d1[11]]);
+        let n2_1 = f32x4::from([self.n2[0], self.n2[1], self.n2[2], self.n2[3]]);
+        let n2_3 = f32x4::from([self.n2[4], self.n2[5], self.n2[6], self.n2[7]]);
+        let n2_5 = f32x4::from([self.n2[8], self.n2[9], self.n2[10], self.n2[11]]);
 
-        let big_n = self.radius as isize;
         let mut ctr = 0usize;
-        let mut ring_buffer: Aligned<A16, _> = Aligned([0f32; 3 * VERTICAL_MOD]);
+        let mut ring_buffer: Aligned<A16, _> = Aligned([0f32; 3 * V_TOTAL_LANES * V_MOD]);
+        let zero: Aligned<A16, _> = Aligned([0f32; V_TOTAL_LANES]);
 
-        let mut small_n = -(big_n as isize) + 1;
-
-        // Warmup: top is out of bounds (zero padded), bottom is usually in-bounds.
-        while small_n < 0 {
+        // Warmup: top is out of bounds (zero padded), bottom is usually
+        // in-bounds.
+        let mut n = -(self.radius as isize) + 1;
+        while n < 0 {
             // bottom is always non-negative since n is initialized in -N + 1.
-            let bottom = (small_n + big_n - 1) as usize;
-            vertical_block(
+            let bottom = n + self.radius as isize - 1;
+            vertical_block::<VECTORS>(
                 d1_1,
                 d1_3,
                 d1_5,
                 n2_1,
                 n2_3,
                 n2_5,
-                &VertBlockInput::SingleInput(if bottom < height {
-                    input[bottom * width + x]
+                &VertBlockInput::SingleInput(if bottom < height as isize {
+                    &input[(bottom as usize * width + x)..]
                 } else {
-                    0f32
+                    zero.as_slice()
                 }),
                 &mut ctr,
                 &mut ring_buffer,
                 &mut VertBlockOutput::None,
             );
-            small_n += 1;
+            n += 1;
         }
 
         // Start producing output; top is still out of bounds.
-        while small_n < (big_n + 1).min(height as isize) {
-            let bottom = (small_n + big_n - 1) as usize;
-            vertical_block(
+        while (n as usize) < (self.radius + 1).min(height) {
+            let bottom = n + self.radius as isize - 1;
+            vertical_block::<VECTORS>(
                 d1_1,
                 d1_3,
                 d1_5,
                 n2_1,
                 n2_3,
                 n2_5,
-                &VertBlockInput::SingleInput(if bottom < height {
-                    input[bottom * width + x]
+                &VertBlockInput::SingleInput(if bottom < height as isize {
+                    &input[(bottom as usize * width + x)..]
                 } else {
-                    0f32
+                    zero.as_slice()
                 }),
                 &mut ctr,
                 &mut ring_buffer,
-                &mut VertBlockOutput::Store(&mut output[small_n as usize * width + x]),
+                &mut VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
             );
-            small_n += 1;
+            n += 1;
         }
 
         // Interior outputs with prefetching and without bounds checks.
-        while small_n < (height as isize - big_n + 1 - VERTICAL_PREFETCH_ROWS as isize) {
-            let top = (small_n - big_n - 1) as usize;
-            let bottom = (small_n + big_n - 1) as usize;
-            vertical_block(
-                d1_1,
-                d1_3,
-                d1_5,
-                n2_1,
-                n2_3,
-                n2_5,
-                &VertBlockInput::TwoInputs((input[top * width + x], input[bottom * width + x])),
-                &mut ctr,
-                &mut ring_buffer,
-                &mut VertBlockOutput::Store(&mut output[small_n as usize * width + x]),
-            );
-
-            // TODO: Use https://doc.rust-lang.org/std/intrinsics/fn.prefetch_read_data.html when stabilized
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                #[cfg(target_arch = "x86")]
-                use core::arch::x86::{_mm_prefetch, _MM_HINT_T0};
-                #[cfg(target_arch = "x86_64")]
-                use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
-                use std::ptr::addr_of;
-
-                // SAFETY: We checked the target arch before calling this
-                unsafe {
-                    _mm_prefetch(
-                        addr_of!(input[(top + VERTICAL_PREFETCH_ROWS) * width + x]).cast(),
-                        _MM_HINT_T0,
-                    );
-                    _mm_prefetch(
-                        addr_of!(input[(bottom + VERTICAL_PREFETCH_ROWS) * width + x]).cast(),
-                        _MM_HINT_T0,
-                    );
-                }
-            }
-
-            small_n += 1;
-        }
-
-        // Bottom border without prefetching and with bounds checks.
-        while small_n < height as isize {
-            let top = (small_n - big_n - 1) as usize;
-            let bottom = (small_n + big_n - 1) as usize;
-            vertical_block(
+        while n < (height as isize - self.radius as isize + 1 - V_PREFETCH_ROWS as isize) {
+            let top = n - self.radius as isize - 1;
+            let bottom = n + self.radius as isize - 1;
+            vertical_block::<VECTORS>(
                 d1_1,
                 d1_3,
                 d1_5,
@@ -377,100 +517,186 @@ impl RecursiveGaussian {
                 n2_3,
                 n2_5,
                 &VertBlockInput::TwoInputs((
-                    input[top * width + x],
-                    if bottom < height {
-                        input[bottom * width + x]
+                    &input[(top as usize * width + x)..],
+                    &input[(bottom as usize * width + x)..],
+                )),
+                &mut ctr,
+                &mut ring_buffer,
+                &mut VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
+            );
+            // TODO: Use https://doc.rust-lang.org/std/intrinsics/fn.prefetch_read_data.html when stabilized
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                #[cfg(target_arch = "x86")]
+                use core::arch::x86::{_mm_prefetch, _MM_HINT_T0};
+                #[cfg(target_arch = "x86_64")]
+                use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+
+                // SAFETY: We checked the target arch before calling this
+                unsafe {
+                    _mm_prefetch(
+                        input[((top as usize + V_PREFETCH_ROWS) * width + x)..]
+                            .as_ptr()
+                            .cast(),
+                        _MM_HINT_T0,
+                    );
+                    _mm_prefetch(
+                        input[((bottom as usize + V_PREFETCH_ROWS) * width + x)..]
+                            .as_ptr()
+                            .cast(),
+                        _MM_HINT_T0,
+                    );
+                }
+            }
+            n += 1;
+        }
+
+        // Bottom border without prefetching and with bounds checks.
+        while (n as usize) < height {
+            let top = n - self.radius as isize - 1;
+            let bottom = n + self.radius as isize - 1;
+            vertical_block::<VECTORS>(
+                d1_1,
+                d1_3,
+                d1_5,
+                n2_1,
+                n2_3,
+                n2_5,
+                &VertBlockInput::TwoInputs((
+                    &input[(top as usize * width + x)..],
+                    if (bottom as usize) < height {
+                        &input[(bottom as usize * width + x)..]
                     } else {
-                        0f32
+                        zero.as_slice()
                     },
                 )),
                 &mut ctr,
                 &mut ring_buffer,
-                &mut VertBlockOutput::Store(&mut output[small_n as usize * width + x]),
+                &mut VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
             );
-
-            small_n += 1;
+            n += 1;
         }
     }
 }
 
+#[inline(always)]
+fn round_up_to<T: PrimInt>(val: T, target: T) -> T {
+    div_ceil(val, target) * target
+}
+
+#[inline(always)]
+fn div_ceil<T: PrimInt>(a: T, b: T) -> T {
+    (a + b - T::one()) / b
+}
+
+#[inline(always)]
+fn shift_left_lanes<const LANES: usize>(data: f32x4) -> f32x4 {
+    assert!(LANES <= 4);
+
+    let mut output = [0f32; 4];
+    output[..(4 - LANES)].copy_from_slice(&data.to_array()[LANES..]);
+    f32x4::from(output)
+}
+
+// Block := `VECTORS` consecutive full vectors (one cache line except on the
+// right boundary, where we can only rely on having one vector). Unrolling to
+// the cache line size improves cache utilization.
 #[allow(clippy::too_many_arguments)]
-fn vertical_block(
-    d1_1: f32,
-    d1_3: f32,
-    d1_5: f32,
-    n2_1: f32,
-    n2_3: f32,
-    n2_5: f32,
+fn vertical_block<const VECTORS: usize>(
+    d1_1: f32x4,
+    d1_3: f32x4,
+    d1_5: f32x4,
+    n2_1: f32x4,
+    n2_3: f32x4,
+    n2_5: f32x4,
     input: &VertBlockInput,
     ctr: &mut usize,
-    ring_buffer: &mut Aligned<A16, [f32; 3 * VERTICAL_MOD]>,
+    ring_buffer: &mut Aligned<A16, [f32; 3 * V_TOTAL_LANES * V_MOD]>,
     output: &mut VertBlockOutput,
 ) {
-    let (y_1, rest) = ring_buffer.split_at_mut(VERTICAL_MOD);
-    let (y_3, y_5) = rest.split_at_mut(VERTICAL_MOD);
+    let mut ring_chunks = ring_buffer.chunks_exact_mut(V_TOTAL_LANES * V_MOD);
+    let y_1 = ring_chunks.next().expect("there are 3 chunks");
+    let y_3 = ring_chunks.next().expect("there are 3 chunks");
+    let y_5 = ring_chunks.next().expect("there are 3 chunks");
 
     *ctr += 1;
-    let n_0 = (*ctr) % VERTICAL_MOD;
-    let n_1 = (*ctr - 1) % VERTICAL_MOD;
-    let n_2 = if *ctr == 1 {
-        // During the first iteration, `ctr` can be 1, and for whatever reason `-1 % 4` in Rust
-        // gives `-1` instead of the answer of `3` that it gives in C.
-        // So we need to manually handle that case.
-        (*ctr + 2) % VERTICAL_MOD
-    } else {
-        (*ctr - 2) % VERTICAL_MOD
-    };
+    let n_0 = *ctr % V_MOD;
+    let n_1 = (*ctr - 1) % V_MOD;
+    let n_2 = ctr.saturating_sub(2) % V_MOD;
 
-    let sum = input.get();
+    for idx_vec in 0..VECTORS {
+        let sum = input.get(idx_vec * V_MAX_LANES);
 
-    let y_n1_1 = y_1[n_1];
-    let y_n1_3 = y_3[n_1];
-    let y_n1_5 = y_5[n_1];
-    let y_n2_1 = y_1[n_2];
-    let y_n2_3 = y_3[n_2];
-    let y_n2_5 = y_5[n_2];
+        let y_n1_1 = &y_1[(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES)..];
+        let y_n1_1 = f32x4::from([y_n1_1[0], y_n1_1[1], y_n1_1[2], y_n1_1[3]]);
+        let y_n1_3 = &y_3[(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES)..];
+        let y_n1_3 = f32x4::from([y_n1_3[0], y_n1_3[1], y_n1_3[2], y_n1_3[3]]);
+        let y_n1_5 = &y_5[(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES)..];
+        let y_n1_5 = f32x4::from([y_n1_5[0], y_n1_5[1], y_n1_5[2], y_n1_5[3]]);
+        let y_n2_1 = &y_1[(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES)..];
+        let y_n2_1 = f32x4::from([y_n2_1[0], y_n2_1[1], y_n2_1[2], y_n2_1[3]]);
+        let y_n2_3 = &y_3[(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES)..];
+        let y_n2_3 = f32x4::from([y_n2_3[0], y_n2_3[1], y_n2_3[2], y_n2_3[3]]);
+        let y_n2_5 = &y_5[(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES)..];
+        let y_n2_5 = f32x4::from([y_n2_5[0], y_n2_5[1], y_n2_5[2], y_n2_5[3]]);
 
-    let y1 = n2_1.mul_add(sum, neg_mul_sub(d1_1, y_n1_1, y_n2_1));
-    let y3 = n2_3.mul_add(sum, neg_mul_sub(d1_3, y_n1_3, y_n2_3));
-    let y5 = n2_5.mul_add(sum, neg_mul_sub(d1_5, y_n1_5, y_n2_5));
-    y_1[n_0] = y1;
-    y_3[n_0] = y3;
-    y_5[n_0] = y5;
-    output.write(y1 + y3 + y5);
+        // (35)
+        let y1 = n2_1.mul_add(sum, d1_1.mul_neg_sub(y_n1_1, y_n2_1));
+        let y3 = n2_3.mul_add(sum, d1_3.mul_neg_sub(y_n1_3, y_n2_3));
+        let y5 = n2_5.mul_add(sum, d1_5.mul_neg_sub(y_n1_5, y_n2_5));
+        y_1[(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)..][..4].copy_from_slice(&y1.to_array());
+        y_3[(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)..][..4].copy_from_slice(&y3.to_array());
+        y_5[(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)..][..4].copy_from_slice(&y5.to_array());
+        output.write(y1 + y3 + y5, idx_vec * V_MAX_LANES);
+    }
+    // NOTE: flushing cache line out_pos hurts performance - less so with
+    // clflushopt than clflush but still a significant slowdown.
 }
 
-enum VertBlockInput {
-    SingleInput(f32),
-    TwoInputs((f32, f32)),
+enum VertBlockInput<'a> {
+    SingleInput(&'a [f32]),
+    TwoInputs((&'a [f32], &'a [f32])),
 }
 
-impl VertBlockInput {
-    pub fn get(&self) -> f32 {
+impl<'a> VertBlockInput<'a> {
+    pub fn get(&self, index: usize) -> f32x4 {
         match *self {
-            Self::SingleInput(input) => input,
-            Self::TwoInputs((input1, input2)) => input1 + input2,
+            Self::SingleInput(input) => {
+                let input = &input[index..];
+                let mut data = [0f32; 4];
+                let rem = input.len().min(4);
+                data[..rem].copy_from_slice(&input[..rem]);
+                f32x4::from(data)
+            }
+            Self::TwoInputs((input1, input2)) => {
+                let input1 = &input1[index..];
+                let input2 = &input2[index..];
+                let mut data1 = [0f32; 4];
+                let mut data2 = [0f32; 4];
+                let rem1 = input1.len().min(4);
+                data1[..rem1].copy_from_slice(&input1[..rem1]);
+                let rem2 = input2.len().min(4);
+                data2[..rem2].copy_from_slice(&input2[..rem2]);
+                f32x4::from(data1) + f32x4::from(data2)
+            }
         }
     }
 }
 
 enum VertBlockOutput<'a> {
     None,
-    Store(&'a mut f32),
+    Store(&'a mut [f32]),
 }
 
 impl<'a> VertBlockOutput<'a> {
-    pub fn write(&mut self, data: f32) {
+    pub fn write(&mut self, data: f32x4, index: usize) {
         match *self {
             Self::None => (),
             Self::Store(ref mut output) => {
-                **output = data;
+                let output = &mut output[index..];
+                let rem = output.len().min(4);
+                output[..rem].copy_from_slice(&data.to_array()[..rem]);
             }
         }
     }
-}
-
-#[inline(always)]
-fn neg_mul_sub(mul: f32, x: f32, sub: f32) -> f32 {
-    (-mul) * x - sub
 }
