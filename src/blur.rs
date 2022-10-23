@@ -213,12 +213,14 @@ impl RecursiveGaussian {
                 let left = n - big_n - 1;
                 let right = n + big_n - 1;
                 let left_val = if left >= 0 {
-                    input[left as usize]
+                    // SAFETY: `left` can never be bigger than `width`
+                    unsafe { *input.get_unchecked(left as usize) }
                 } else {
                     0f32
                 };
                 let right_val = if right < width as isize {
-                    input[right as usize]
+                    // SAFETY: this branch ensures that `right` is not bigger than `width`
+                    unsafe { *input.get_unchecked(right as usize) }
                 } else {
                     0f32
                 };
@@ -243,7 +245,11 @@ impl RecursiveGaussian {
                 prev_5 = out_5;
 
                 if n >= 0 {
-                    output[n as usize] = out_1 + out_3 + out_5;
+                    // SAFETY: We know that this chunk of output is of size `width`,
+                    // which `n` cannot be larger than.
+                    unsafe {
+                        *output.get_unchecked_mut(n as usize) = out_1 + out_3 + out_5;
+                    }
                 }
 
                 n += 1;
