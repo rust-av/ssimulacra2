@@ -7,6 +7,7 @@ repository = "https://github.com/rust-av/ssimulacra2"
 homepage = "https://github.com/rust-av/ssimulacra2"
 documentation = "https://docs.rs/ssimulacra2"
 exclude = ["test_data"]
+license = "BSD-2-Clause"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
