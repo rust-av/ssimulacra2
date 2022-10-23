@@ -2,7 +2,6 @@ use std::{f64::consts::PI, mem::size_of};
 
 use aligned::{Aligned, A16};
 use nalgebra::base::{Matrix3, Matrix3x1};
-use num_traits::PrimInt;
 use wide::f32x4;
 
 pub struct Blur {
@@ -39,15 +38,16 @@ impl Blur {
     fn blur_plane(&mut self, plane: &[f32]) -> Vec<f32> {
         let mut out = vec![0f32; self.width * self.height];
         self.kernel
-            .fast_gaussian_horizontal(plane, &mut self.temp, self.width, self.height);
+            .fast_gaussian_horizontal(plane, &mut self.temp, self.width);
         self.kernel
             .fast_gaussian_vertical(&self.temp, &mut out, self.width, self.height);
         out
     }
 }
 
+const MAX_LANES: isize = 4;
 const V_CACHE_LINE_LANES: usize = 64 / size_of::<f32>();
-const V_MAX_LANES: usize = 4;
+const V_MAX_LANES: usize = MAX_LANES as usize;
 const V_CACHE_LINE_VECTORS: usize = V_CACHE_LINE_LANES / V_MAX_LANES;
 const V_TOTAL_LANES: usize = V_CACHE_LINE_VECTORS * V_MAX_LANES;
 const V_MOD: usize = 4;
@@ -183,94 +183,34 @@ impl RecursiveGaussian {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub fn fast_gaussian_horizontal(
-        &self,
-        input: &[f32],
-        output: &mut [f32],
-        width: usize,
-        height: usize,
-    ) {
+    pub fn fast_gaussian_horizontal(&self, input: &[f32], output: &mut [f32], width: usize) {
         assert_eq!(input.len(), output.len());
 
-        let radius = self.radius as isize;
-        for y in 0..height {
-            let input = &input[(y * width)..][..width];
-            let output = &mut output[(y * width)..][..width];
+        let big_n = self.radius as isize;
+        for (input, output) in input
+            .chunks_exact(width)
+            .zip(output.chunks_exact_mut(width))
+        {
+            let mul_in_1 = self.mul_in[0];
+            let mul_in_3 = self.mul_in[4];
+            let mul_in_5 = self.mul_in[8];
+            let mul_prev_1 = self.mul_prev[0];
+            let mul_prev_3 = self.mul_prev[4];
+            let mul_prev_5 = self.mul_prev[8];
+            let mul_prev2_1 = self.mul_prev2[0];
+            let mul_prev2_3 = self.mul_prev2[4];
+            let mul_prev2_5 = self.mul_prev2[8];
+            let mut prev_1 = 0f32;
+            let mut prev_3 = 0f32;
+            let mut prev_5 = 0f32;
+            let mut prev2_1 = 0f32;
+            let mut prev2_3 = 0f32;
+            let mut prev2_5 = 0f32;
 
-            // Although the current output depends on the previous output, we can unroll
-            // up to 4x by precomputing up to fourth powers of the constants. Beyond that,
-            // numerical precision might become a problem.
-            //
-            // Rust optimization: Casting from a slice requires a match statement to know
-            // the length of the input by the `wide` crate. Using a static size array allows
-            // a direct cast.
-            let mul_in_1 = f32x4::from([
-                self.mul_in[0],
-                self.mul_in[1],
-                self.mul_in[2],
-                self.mul_in[3],
-            ]);
-            let mul_in_3 = f32x4::from([
-                self.mul_in[4],
-                self.mul_in[5],
-                self.mul_in[6],
-                self.mul_in[7],
-            ]);
-            let mul_in_5 = f32x4::from([
-                self.mul_in[8],
-                self.mul_in[9],
-                self.mul_in[10],
-                self.mul_in[11],
-            ]);
-            let mul_prev_1 = f32x4::from([
-                self.mul_prev[0],
-                self.mul_prev[1],
-                self.mul_prev[2],
-                self.mul_prev[3],
-            ]);
-            let mul_prev_3 = f32x4::from([
-                self.mul_prev[4],
-                self.mul_prev[5],
-                self.mul_prev[6],
-                self.mul_prev[7],
-            ]);
-            let mul_prev_5 = f32x4::from([
-                self.mul_prev[8],
-                self.mul_prev[9],
-                self.mul_prev[10],
-                self.mul_prev[11],
-            ]);
-            let mul_prev2_1 = f32x4::from([
-                self.mul_prev2[0],
-                self.mul_prev2[1],
-                self.mul_prev2[2],
-                self.mul_prev2[3],
-            ]);
-            let mul_prev2_3 = f32x4::from([
-                self.mul_prev2[4],
-                self.mul_prev2[5],
-                self.mul_prev2[6],
-                self.mul_prev2[7],
-            ]);
-            let mul_prev2_5 = f32x4::from([
-                self.mul_prev2[8],
-                self.mul_prev2[9],
-                self.mul_prev2[10],
-                self.mul_prev2[11],
-            ]);
-            let mut prev_1 = f32x4::ZERO;
-            let mut prev_3 = f32x4::ZERO;
-            let mut prev_5 = f32x4::ZERO;
-            let mut prev2_1 = f32x4::ZERO;
-            let mut prev2_3 = f32x4::ZERO;
-            let mut prev2_5 = f32x4::ZERO;
-
-            let mut n = -radius + 1;
-            // Left side with bounds checks and only write output after n >= 0.
-            let first_aligned = round_up_to(radius, 4);
-            while n < (first_aligned.min(width as isize)) {
-                let left = n - radius - 1;
-                let right = n + radius - 1;
+            let mut n = (-big_n) + 1;
+            while n < width as isize {
+                let left = n - big_n - 1;
+                let right = n + big_n - 1;
                 let left_val = if left >= 0 {
                     input[left as usize]
                 } else {
@@ -282,9 +222,7 @@ impl RecursiveGaussian {
                     0f32
                 };
                 let sum = left_val + right_val;
-                let sum = f32x4::from([sum; 4]);
 
-                // (Only processing a single lane here, no need to broadcast)
                 let mut out_1 = sum * mul_in_1;
                 let mut out_3 = sum * mul_in_3;
                 let mut out_5 = sum * mul_in_5;
@@ -304,109 +242,8 @@ impl RecursiveGaussian {
                 prev_5 = out_5;
 
                 if n >= 0 {
-                    output[n as usize] = (out_1 + out_3 + out_5).to_array()[0];
+                    output[n as usize] = out_1 + out_3 + out_5;
                 }
-
-                n += 1;
-            }
-
-            // The above loop is effectively scalar but it is convenient to use the same
-            // prev/prev2 variables, so broadcast to each lane before the unrolled loop.
-            prev2_1 = f32x4::from([prev2_1.to_array()[0]; 4]);
-            prev2_3 = f32x4::from([prev2_3.to_array()[0]; 4]);
-            prev2_5 = f32x4::from([prev2_5.to_array()[0]; 4]);
-            prev_1 = f32x4::from([prev_1.to_array()[0]; 4]);
-            prev_3 = f32x4::from([prev_3.to_array()[0]; 4]);
-            prev_5 = f32x4::from([prev_5.to_array()[0]; 4]);
-
-            // Unrolled, no bounds checking needed.
-            while n < width as isize - radius + 1 - (4 - 1) {
-                let in1 = &input[(n - radius - 1) as usize..][..4];
-                let in2 = &input[(n + radius - 1) as usize..][..4];
-                let sum = f32x4::from([in1[0], in1[1], in1[2], in1[3]])
-                    + f32x4::from([in2[0], in2[1], in2[2], in2[3]]);
-
-                // To get a vector of output(s), we multiply broadcasted vectors (of each
-                // input plus the two previous outputs) and add them all together.
-                // Incremental broadcasting and shifting is expected to be cheaper than
-                // horizontal adds or transposing 4x4 values because they run on a different
-                // port, concurrently with the FMA.
-                let in0 = f32x4::from([sum.to_array()[0]; 4]);
-                let mut out_1 = in0 * mul_in_1;
-                let mut out_3 = in0 * mul_in_3;
-                let mut out_5 = in0 * mul_in_5;
-
-                let in1 = f32x4::from([sum.to_array()[1]; 4]);
-                out_1 = shift_left_lanes::<1>(mul_in_1).mul_add(in1, out_1);
-                out_3 = shift_left_lanes::<1>(mul_in_3).mul_add(in1, out_3);
-                out_5 = shift_left_lanes::<1>(mul_in_5).mul_add(in1, out_5);
-
-                let in2 = f32x4::from([sum.to_array()[2]; 4]);
-                out_1 = shift_left_lanes::<2>(mul_in_1).mul_add(in2, out_1);
-                out_3 = shift_left_lanes::<2>(mul_in_3).mul_add(in2, out_3);
-                out_5 = shift_left_lanes::<2>(mul_in_5).mul_add(in2, out_5);
-
-                let in3 = f32x4::from([sum.to_array()[3]; 4]);
-                out_1 = shift_left_lanes::<3>(mul_in_1).mul_add(in3, out_1);
-                out_3 = shift_left_lanes::<3>(mul_in_3).mul_add(in3, out_3);
-                out_5 = shift_left_lanes::<3>(mul_in_5).mul_add(in3, out_5);
-
-                out_1 = mul_prev2_1.mul_add(prev2_1, out_1);
-                out_3 = mul_prev2_3.mul_add(prev2_3, out_3);
-                out_5 = mul_prev2_5.mul_add(prev2_5, out_5);
-
-                out_1 = mul_prev_1.mul_add(prev_1, out_1);
-                out_3 = mul_prev_3.mul_add(prev_3, out_3);
-                out_5 = mul_prev_5.mul_add(prev_5, out_5);
-
-                prev2_1 = f32x4::from([out_1.to_array()[2]; 4]);
-                prev2_3 = f32x4::from([out_3.to_array()[2]; 4]);
-                prev2_5 = f32x4::from([out_5.to_array()[2]; 4]);
-                prev_1 = f32x4::from([out_1.to_array()[3]; 4]);
-                prev_3 = f32x4::from([out_3.to_array()[3]; 4]);
-                prev_5 = f32x4::from([out_5.to_array()[3]; 4]);
-
-                output[n as usize..][..4].copy_from_slice(&(out_1 + out_3 + out_5).to_array());
-
-                n += 4;
-            }
-
-            // Remainder handling with bounds checks
-            while n < width as isize {
-                let left = n - self.radius as isize - 1;
-                let right = n + self.radius as isize - 1;
-                let left_val = if left >= 0 {
-                    input[left as usize]
-                } else {
-                    0.0f32
-                };
-                let right_val = if right < width as isize {
-                    input[right as usize]
-                } else {
-                    0.0f32
-                };
-                let sum = f32x4::from([left_val + right_val; 4]);
-
-                // (Only processing a single lane here, no need to broadcast)
-                let mut out_1 = sum * mul_in_1;
-                let mut out_3 = sum * mul_in_3;
-                let mut out_5 = sum * mul_in_5;
-
-                out_1 = mul_prev2_1.mul_add(prev2_1, out_1);
-                out_3 = mul_prev2_3.mul_add(prev2_3, out_3);
-                out_5 = mul_prev2_5.mul_add(prev2_5, out_5);
-                prev2_1 = prev_1;
-                prev2_3 = prev_3;
-                prev2_5 = prev_5;
-
-                out_1 = mul_prev_1.mul_add(prev_1, out_1);
-                out_3 = mul_prev_3.mul_add(prev_3, out_3);
-                out_5 = mul_prev_5.mul_add(prev_5, out_5);
-                prev_1 = out_1;
-                prev_3 = out_3;
-                prev_5 = out_5;
-
-                output[n as usize] = (out_1 + out_3 + out_5).to_array()[0];
 
                 n += 1;
             }
@@ -579,25 +416,6 @@ impl RecursiveGaussian {
     }
 }
 
-#[inline(always)]
-fn round_up_to<T: PrimInt>(val: T, target: T) -> T {
-    div_ceil(val, target) * target
-}
-
-#[inline(always)]
-fn div_ceil<T: PrimInt>(a: T, b: T) -> T {
-    (a + b - T::one()) / b
-}
-
-#[inline(always)]
-fn shift_left_lanes<const LANES: usize>(data: f32x4) -> f32x4 {
-    assert!(LANES <= 4);
-
-    let mut output = [0f32; 4];
-    output[..(4 - LANES)].copy_from_slice(&data.to_array()[LANES..]);
-    f32x4::from(output)
-}
-
 // Block := `VECTORS` consecutive full vectors (one cache line except on the
 // right boundary, where we can only rely on having one vector). Unrolling to
 // the cache line size improves cache utilization.
@@ -622,7 +440,14 @@ fn vertical_block<const VECTORS: usize>(
     *ctr += 1;
     let n_0 = *ctr % V_MOD;
     let n_1 = (*ctr - 1) % V_MOD;
-    let n_2 = ctr.saturating_sub(2) % V_MOD;
+    let n_2 = if *ctr == 1 {
+        // During the first iteration, `ctr` will be `1`, and we will end up with `-1 % 4`.
+        // The result this gives in Rust is different than the result it gives in C.
+        // So we just manually handle that case.
+        3
+    } else {
+        (*ctr - 2) % V_MOD
+    };
 
     for idx_vec in 0..VECTORS {
         let sum = input.get(idx_vec * V_MAX_LANES);
