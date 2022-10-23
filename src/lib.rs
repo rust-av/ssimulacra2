@@ -220,12 +220,13 @@ fn ssim_map(
 
     for c in 0..3 {
         let mut sum1 = [0.0f64; 2];
-        for y in 0..height {
-            let row_m1 = &m1[c][(y * width)..][..width];
-            let row_m2 = &m2[c][(y * width)..][..width];
-            let row_s11 = &s11[c][(y * width)..][..width];
-            let row_s22 = &s22[c][(y * width)..][..width];
-            let row_s12 = &s12[c][(y * width)..][..width];
+        for (row_m1, (row_m2, (row_s11, (row_s22, row_s12)))) in m1[c].chunks_exact(width).zip(
+            m2[c].chunks_exact(width).zip(
+                s11[c]
+                    .chunks_exact(width)
+                    .zip(s22[c].chunks_exact(width).zip(s12[c].chunks_exact(width))),
+            ),
+        ) {
             for x in 0..width {
                 let mu1 = row_m1[x];
                 let mu2 = row_m2[x];
@@ -262,11 +263,11 @@ fn edge_diff_map(
 
     for c in 0..3 {
         let mut sum1 = [0.0f64; 4];
-        for y in 0..height {
-            let row1 = &img1[c][(y * width)..][..width];
-            let row2 = &img2[c][(y * width)..][..width];
-            let rowm1 = &mu1[c][(y * width)..][..width];
-            let rowm2 = &mu2[c][(y * width)..][..width];
+        for (row1, (row2, (rowm1, rowm2))) in img1[c].chunks_exact(width).zip(
+            img2[c]
+                .chunks_exact(width)
+                .zip(mu1[c].chunks_exact(width).zip(mu2[c].chunks_exact(width))),
+        ) {
             for x in 0..width {
                 let d1: f64 = (1.0 + f64::from((row2[x] - rowm2[x]).abs()))
                     / (1.0 + f64::from((row1[x] - rowm1[x]).abs()))
