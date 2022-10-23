@@ -1,6 +1,7 @@
 use std::{f64::consts::PI, mem::size_of};
 
 use aligned::{Aligned, A16};
+use arrayref::array_ref;
 use nalgebra::base::{Matrix3, Matrix3x1};
 use wide::f32x4;
 
@@ -486,23 +487,11 @@ enum VertBlockInput<'a> {
 impl<'a> VertBlockInput<'a> {
     pub fn get(&self, index: usize) -> f32x4 {
         match *self {
-            Self::SingleInput(input) => {
-                let input = &input[index..];
-                let mut data = [0f32; 4];
-                let rem = input.len().min(4);
-                data[..rem].copy_from_slice(&input[..rem]);
-                f32x4::from(data)
-            }
+            Self::SingleInput(input) => safe_load_f32x4(&input[index..]),
             Self::TwoInputs((input1, input2)) => {
-                let input1 = &input1[index..];
-                let input2 = &input2[index..];
-                let mut data1 = [0f32; 4];
-                let mut data2 = [0f32; 4];
-                let rem1 = input1.len().min(4);
-                data1[..rem1].copy_from_slice(&input1[..rem1]);
-                let rem2 = input2.len().min(4);
-                data2[..rem2].copy_from_slice(&input2[..rem2]);
-                f32x4::from(data1) + f32x4::from(data2)
+                let data1 = safe_load_f32x4(&input1[index..]);
+                let data2 = safe_load_f32x4(&input2[index..]);
+                data1 + data2
             }
         }
     }
@@ -523,5 +512,19 @@ impl<'a> VertBlockOutput<'a> {
                 output[..rem].copy_from_slice(&data.to_array()[..rem]);
             }
         }
+    }
+}
+
+#[inline(always)]
+fn safe_load_f32x4(arr: &[f32]) -> f32x4 {
+    if arr.len() >= 4 {
+        // Faster because it avoids copying
+        f32x4::from(*array_ref![arr, 0, 4])
+    } else {
+        // Slower but necessary for handling edges of the input
+        let mut data = [0f32; 4];
+        let rem = arr.len();
+        data[..rem].copy_from_slice(&arr[..rem]);
+        f32x4::from(data)
     }
 }
