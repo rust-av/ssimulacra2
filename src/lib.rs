@@ -502,7 +502,7 @@ mod tests {
         let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
         let expected = 1.721_043_99_f64;
         assert!(
-            (result - expected).abs() < 0.005f64,
+            (result - expected).abs() < 0.01f64,
             "Result {:.6} not equal to expected {:.6}",
             result,
             expected
