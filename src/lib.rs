@@ -55,16 +55,16 @@ const NUM_SCALES: usize = 6;
 /// - If the source and distorted image width and height do not match
 /// - If the source or distorted image cannot be converted to XYB successfully
 /// - If the image is smaller than 8x8 pixels
-pub fn compute_frame_ssimulacra2<T: TryInto<Xyb>, U: TryInto<Xyb>>(
+pub fn compute_frame_ssimulacra2<T: TryInto<LinearRgb>, U: TryInto<LinearRgb>>(
     source: T,
     distorted: U,
 ) -> Result<f64> {
-    let mut img1: Xyb = source
+    let mut img1: LinearRgb = source
         .try_into()
-        .map_err(|_e| anyhow::anyhow!("Failed to convert to XYB"))?;
-    let mut img2: Xyb = distorted
+        .map_err(|_e| anyhow::anyhow!("Failed to convert to Linear Rgb"))?;
+    let mut img2: LinearRgb = distorted
         .try_into()
-        .map_err(|_e| anyhow::anyhow!("Failed to convert to XYB"))?;
+        .map_err(|_e| anyhow::anyhow!("Failed to convert to Linear Rgb"))?;
 
     if img1.width() != img2.width() || img1.height() != img2.height() {
         bail!("Source and distorted image width and height must be equal");
@@ -74,16 +74,8 @@ pub fn compute_frame_ssimulacra2<T: TryInto<Xyb>, U: TryInto<Xyb>>(
         bail!("Images must be at least 8x8 pixels");
     }
 
-    make_positive_xyb(&mut img1);
-    make_positive_xyb(&mut img2);
-
     let mut width = img1.width();
     let mut height = img1.height();
-
-    // SSIMULACRA2 works with the data in a planar format,
-    // so we need to convert to that.
-    let mut img1 = xyb_to_planar(&img1);
-    let mut img2 = xyb_to_planar(&img2);
 
     let mut mul = [
         vec![0.0f32; width * height],
@@ -99,13 +91,26 @@ pub fn compute_frame_ssimulacra2<T: TryInto<Xyb>, U: TryInto<Xyb>>(
         }
 
         if scale > 0 {
-            (img1, _, _) = downscale_by_2(&img1, width, height);
-            (img2, width, height) = downscale_by_2(&img2, width, height);
+            img1 = downscale_by_2(&img1);
+            img2 = downscale_by_2(&img2);
+            width = img1.width();
+            height = img2.height();
         }
         for c in &mut mul {
             c.truncate(width * height);
         }
         blur.shrink_to(width, height);
+
+        let mut img1 = Xyb::from(&img1);
+        let mut img2 = Xyb::from(&img2);
+
+        make_positive_xyb(&mut img1);
+        make_positive_xyb(&mut img2);
+
+        // SSIMULACRA2 works with the data in a planar format,
+        // so we need to convert to that.
+        let img1 = xyb_to_planar(&img1);
+        let img2 = xyb_to_planar(&img2);
 
         image_multiply(&img1, &img1, &mut mul);
         let sigma1_sq = blur.blur(&mul);
@@ -132,8 +137,9 @@ pub fn compute_frame_ssimulacra2<T: TryInto<Xyb>, U: TryInto<Xyb>>(
 
 fn make_positive_xyb(xyb: &mut Xyb) {
     for pix in xyb.data_mut().iter_mut() {
-        pix[2] += 1.0 - pix[1];
-        pix[0] += 0.5;
+        pix[2] += 1.1f32 - pix[1];
+        pix[0] += 0.5f32;
+        pix[1] += 0.05f32;
     }
 }
 
@@ -165,42 +171,36 @@ fn image_multiply(img1: &[Vec<f32>; 3], img2: &[Vec<f32>; 3], out: &mut [Vec<f32
     }
 }
 
-fn downscale_by_2(
-    in_data: &[Vec<f32>; 3],
-    in_w: usize,
-    in_h: usize,
-) -> ([Vec<f32>; 3], usize, usize) {
+fn downscale_by_2(in_data: &LinearRgb) -> LinearRgb {
     const SCALE: usize = 2;
+    let in_w = in_data.width();
+    let in_h = in_data.height();
     let out_w = (in_w + SCALE - 1) / SCALE;
     let out_h = (in_h + SCALE - 1) / SCALE;
-    let mut out_data = [
-        vec![0.0f32; out_w * out_h],
-        vec![0.0f32; out_w * out_h],
-        vec![0.0f32; out_w * out_h],
-    ];
+    let mut out_data = vec![[0.0f32; 3]; out_w * out_h];
     let normalize = 1f32 / (SCALE * SCALE) as f32;
-    for c in 0..3 {
-        let in_plane = &in_data[c];
-        let out_plane = &mut out_data[c];
-        for oy in 0..out_h {
-            for ox in 0..out_w {
+
+    let in_data = &in_data.data();
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            for c in 0..3 {
                 let mut sum = 0f32;
                 for iy in 0..SCALE {
                     for ix in 0..SCALE {
                         let x = (ox * SCALE + ix).min(in_w - 1);
                         let y = (oy * SCALE + iy).min(in_h - 1);
-                        let in_pix = in_plane[y * in_w + x];
+                        let in_pix = in_data[y * in_w + x];
 
-                        sum += in_pix;
+                        sum += in_pix[c];
                     }
                 }
-                let out_pix = &mut out_plane[oy * out_w + ox];
-                *out_pix = sum * normalize;
+                let out_pix = &mut out_data[oy * out_w + ox];
+                out_pix[c] = sum * normalize;
             }
         }
     }
 
-    (out_data, out_w, out_h)
+    LinearRgb::new(out_data, out_w, out_h).expect("Resolution and data size match")
 }
 
 fn ssim_map(
@@ -212,8 +212,7 @@ fn ssim_map(
     s22: &[Vec<f32>; 3],
     s12: &[Vec<f32>; 3],
 ) -> [f64; 3 * 2] {
-    const C1: f32 = 0.0001f32;
-    const C2: f32 = 0.0003f32;
+    const C2: f32 = 0.0009f32;
 
     let one_per_pixels = 1.0f64 / (width * height) as f64;
     let mut plane_averages = [0f64; 3 * 2];
@@ -233,11 +232,10 @@ fn ssim_map(
                 let mu11 = mu1 * mu1;
                 let mu22 = mu2 * mu2;
                 let mu12 = mu1 * mu2;
-                let num_m = 2f32.mul_add(mu12, C1);
+                let num_m = 1.0f32 - (mu1 - mu2).powi(2);
                 let num_s = 2f32.mul_add(row_s12[x] - mu12, C2);
-                let denom_m = mu11 + mu22 + C1;
                 let denom_s = (row_s11[x] - mu11) + (row_s22[x] - mu22) + C2;
-                let mut d = 1.0f64 - f64::from((num_m * num_s) / (denom_m * denom_s));
+                let mut d = 1.0f64 - f64::from((num_m * num_s) / denom_s);
                 d = d.max(0.0);
                 sum1[0] += d;
                 sum1[1] += d.powi(4);
@@ -308,114 +306,114 @@ impl Msssim {
     #[allow(clippy::too_many_lines)]
     pub fn score(&self) -> f64 {
         const WEIGHT: [f64; 108] = [
-            4.219_667_647_997_749e-5f64,
-            0.012_686_211_358_327_482f64,
-            3.107_147_477_665_606e-5f64,
-            0.000_543_596_238_167_687_3f64,
-            0.093_951_297_338_375_15f64,
-            0.000_231_164_895_018_842_74f64,
-            3.116_178_275_375_247_6e-5f64,
-            0.039_270_859_874_546_04f64,
-            3.112_320_351_661_424e-5f64,
-            15.207_946_778_270_552f64,
-            0.116_853_730_606_454_32f64,
-            0.108_258_830_426_009_81f64,
-            3.116_785_767_387_498e-5f64,
-            3.131_457_976_301_988e-5f64,
-            3.114_664_519_432_431e-5f64,
-            3.111_881_734_196_853e-5f64,
-            0.150_526_079_086_462_2f64,
-            1.181_932_253_296_347f64,
-            0.023_779_401_135_092_804f64,
-            3.118_721_767_259_025e-5f64,
-            3.107_147_477_665_606e-5f64,
-            3.107_147_477_665_606e-5f64,
-            0.292_630_711_597_291_26f64,
-            100.0f64,
-            0.078_351_919_030_236_42f64,
-            0.308_749_239_640_701f64,
-            3.110_101_392_123_088e-5f64,
-            0.033_134_729_290_677_18f64,
-            1.261_558_573_839_896_7f64,
-            1.286_504_153_416_386_1f64,
-            0.000_500_715_801_872_941_8f64,
-            3.114_135_552_706_454e-5f64,
-            3.107_147_477_665_606e-5f64,
-            0.099_621_988_698_567_2f64,
-            0.074_444_825_774_388_82f64,
-            0.113_724_270_846_116_47f64,
-            5.518_066_533_005_683e-5f64,
-            3.135_558_661_193_638e-5f64,
-            3.116_549_250_103_961_6e-5f64,
-            0.347_509_429_646_832_73f64,
-            3.456_527_094_525_263_5e-5f64,
-            4.088_543_972_599_083_5f64,
-            3.401_042_790_207_587e-5f64,
-            3.107_147_477_665_606e-5f64,
-            3.131_677_581_003_078_4e-5f64,
-            0.003_537_287_786_951_06f64,
-            0.000_288_918_817_458_960_75f64,
-            13.567_765_144_191_44f64,
-            28.427_922_207_790_395f64,
-            4.698_319_951_601_526e-5f64,
-            3.124_776_402_918_527_7e-5f64,
-            0.130_492_430_895_520_2f64,
-            2.812_834_792_796_773_6f64,
-            7.902_846_378_027_295e-5f64,
-            1.310_663_427_102_324_8f64,
-            0.000_215_730_430_846_994_28f64,
-            0.000_130_161_602_971_856_64f64,
-            3.406_144_249_596_765_8f64,
-            4.460_412_915_533_889f64,
-            3.107_147_477_665_606e-5f64,
-            3.277_361_057_918_426_5e-5f64,
-            0.103_694_572_772_048_52f64,
-            3.629_363_118_118_345e-5f64,
-            0.000_848_350_990_510_504_7f64,
-            1.193_383_042_496_474_2f64,
-            3.342_669_917_216_767e-5f64,
-            3.112_936_463_123_272_5e-5f64,
-            3.111_597_216_765_016e-5f64,
-            0.002_772_786_993_656_906f64,
-            5.506_805_306_998_43e-5f64,
-            3.107_147_477_665_606e-5f64,
-            3.113_120_547_104_664e-5f64,
-            3.109_181_778_038_206e-5f64,
-            3.107_147_477_665_606e-5f64,
-            3.111_874_829_531_125e-5f64,
-            3.271_770_143_775_665e-5f64,
-            0.000_159_264_837_603_090_3f64,
-            7.958_992_275_525_212e-5f64,
-            3.276_592_137_968_492_6e-5f64,
-            3.119_778_402_449_48e-5f64,
-            3.117_375_426_220_37e-5f64,
-            3.269_854_031_795_471_6e-5f64,
-            0.000_206_695_229_672_426_7f64,
-            8.396_345_538_652_65e-5f64,
-            3.444_512_635_775_165_4e-5f64,
-            4.973_593_015_122_901e-5f64,
-            3.108_593_217_115_985e-5f64,
-            7.448_916_645_891_313e-5f64,
-            0.000_650_549_577_087_655_7f64,
-            4.342_326_567_408_072_4e-5f64,
-            7.247_563_231_427_279e-5f64,
-            0.000_212_235_447_640_596_32f64,
-            3.117_729_633_383_97e-5f64,
-            0.406_753_628_973_467_8f64,
-            0.138_980_498_370_882_55f64,
-            4.541_178_136_114_84f64,
-            0.068_534_911_051_404_75f64,
-            0.155_812_526_556_593_17f64,
-            0.099_826_649_210_247_64f64,
-            3.440_168_932_652_795f64,
-            0.128_296_531_034_086_23f64,
-            56.599_309_867_339_67f64,
-            5.773_410_728_426_853e-5f64,
-            0.106_744_046_353_943_3f64,
-            3.108_444_898_647_367e-5f64,
-            3.374_827_724_533_791e-5f64,
-            0.020_250_432_987_237_055f64,
-            0.133_468_423_072_341_2f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            1.003_547_935_251_235_3_f64,
+            0.000_113_220_611_104_747_35_f64,
+            0.000_404_429_918_236_859_36_f64,
+            0.001_895_383_410_578_377_3_f64,
+            0.0_f64,
+            0.0_f64,
+            8.982_542_997_575_905_f64,
+            0.989_978_579_604_555_6_f64,
+            0.0_f64,
+            0.974_831_513_120_794_2_f64,
+            0.958_157_516_993_797_3_f64,
+            0.0_f64,
+            0.513_361_177_795_294_6_f64,
+            1.042_318_931_733_124_3_f64,
+            0.000_308_010_928_520_841_f64,
+            12.149_584_966_240_063_f64,
+            0.956_557_724_811_546_7_f64,
+            0.0_f64,
+            1.040_666_812_313_682_4_f64,
+            81.511_390_460_573_62_f64,
+            0.305_933_918_953_309_46_f64,
+            1.075_221_443_362_677_9_f64,
+            1.103_904_236_946_461_1_f64,
+            0.0_f64,
+            1.021_911_638_819_618_f64,
+            1.114_182_329_685_572_2_f64,
+            0.973_084_575_144_170_5_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.983_391_842_609_550_5_f64,
+            0.792_038_513_705_986_7_f64,
+            0.971_074_041_151_405_3_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.538_707_790_315_263_8_f64,
+            0.0_f64,
+            3.403_694_560_115_580_4_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            2.337_569_295_661_117_f64,
+            0.0_f64,
+            5.707_946_510_901_609_f64,
+            37.830_864_238_781_57_f64,
+            0.0_f64,
+            0.0_f64,
+            3.825_820_059_430_518_5_f64,
+            0.0_f64,
+            0.0_f64,
+            24.073_659_674_271_497_f64,
+            0.0_f64,
+            0.0_f64,
+            13.181_871_265_286_068_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            10.007_501_212_628_95_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            52.514_283_856_038_91_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.0_f64,
+            0.994_646_426_789_441_7_f64,
+            0.0_f64,
+            0.0_f64,
+            0.000_604_044_771_593_481_6_f64,
+            0.0_f64,
+            0.0_f64,
+            0.994_517_149_137_407_2_f64,
+            0.0_f64,
+            2.826_004_380_945_437_6_f64,
+            1.005_264_276_653_451_6_f64,
+            8.201_441_997_546_244e-5_f64,
+            12.154_041_855_876_695_f64,
+            32.292_928_706_201_266_f64,
+            0.992_837_130_387_521_f64,
+            0.0_f64,
+            30.719_255_178_446_03_f64,
+            0.000_123_099_070_222_787_43_f64,
+            0.0_f64,
+            0.982_626_023_705_173_4_f64,
+            0.0_f64,
+            0.0_f64,
+            0.998_092_836_783_765_1_f64,
+            0.012_142_430_067_163_312_f64,
         ];
 
         let mut ssim = 0.0f64;
@@ -434,10 +432,10 @@ impl Msssim {
             }
         }
 
-        ssim = ssim * 11.480_665_013_024_748f64 - 1.020_461_049_104_017_4f64;
+        ssim = ssim * 17.829_717_797_575_952_f64 - 1.634_169_143_917_183_f64;
 
         if ssim > 0.0f64 {
-            ssim = 100.0f64 - 10.0f64 * ssim.powf(0.640_203_200_929_897_9f64);
+            ssim = 100.0f64 - 10.0f64 * ssim.powf(0.545_326_100_951_021_3_f64);
         } else {
             ssim = 100.0f64;
         }
@@ -500,7 +498,7 @@ mod tests {
         )
         .unwrap();
         let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
-        let expected = 1.721_043_99_f64;
+        let expected = 8.764_571_f64;
         assert!(
             (result - expected).abs() < 0.01f64,
             "Result {:.6} not equal to expected {:.6}",
