@@ -1,7 +1,6 @@
-use std::{f64::consts::PI, mem::size_of};
+use std::{f64::consts::PI, mem::size_of, slice};
 
 use aligned::{Aligned, A16};
-use arrayref::array_ref;
 use nalgebra::base::{Matrix3, Matrix3x1};
 use wide::f32x4;
 
@@ -316,7 +315,11 @@ impl RecursiveGaussian {
                 n2_3,
                 n2_5,
                 &VertBlockInput::SingleInput(if bottom < height as isize {
-                    &input[(bottom as usize * width + x)..]
+                    // SAFETY: We know that `start` can never be outside the bounds of `input`
+                    unsafe {
+                        let start = bottom as usize * width + x;
+                        slice::from_raw_parts(input.as_ptr().add(start), input.len() - start)
+                    }
                 } else {
                     zero.as_slice()
                 }),
@@ -330,22 +333,34 @@ impl RecursiveGaussian {
         // Start producing output; top is still out of bounds.
         while (n as usize) < (self.radius + 1).min(height) {
             let bottom = n + self.radius as isize - 1;
-            vertical_block::<VECTORS>(
-                d1_1,
-                d1_3,
-                d1_5,
-                n2_1,
-                n2_3,
-                n2_5,
-                &VertBlockInput::SingleInput(if bottom < height as isize {
-                    &input[(bottom as usize * width + x)..]
-                } else {
-                    zero.as_slice()
-                }),
-                &mut ctr,
-                &mut ring_buffer,
-                &mut VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
-            );
+            // SAFETY: We know that the indexes can never be outside the bounds of the data
+            unsafe {
+                vertical_block::<VECTORS>(
+                    d1_1,
+                    d1_3,
+                    d1_5,
+                    n2_1,
+                    n2_3,
+                    n2_5,
+                    &VertBlockInput::SingleInput(if bottom < height as isize {
+                        {
+                            let start = bottom as usize * width + x;
+                            slice::from_raw_parts(input.as_ptr().add(start), input.len() - start)
+                        }
+                    } else {
+                        zero.as_slice()
+                    }),
+                    &mut ctr,
+                    &mut ring_buffer,
+                    &mut VertBlockOutput::Store({
+                        let start = n as usize * width + x;
+                        slice::from_raw_parts_mut(
+                            output.as_mut_ptr().add(start),
+                            output.len() - start,
+                        )
+                    }),
+                );
+            }
             n += 1;
         }
 
@@ -353,21 +368,36 @@ impl RecursiveGaussian {
         while n < (height as isize - self.radius as isize + 1 - V_PREFETCH_ROWS as isize) {
             let top = n - self.radius as isize - 1;
             let bottom = n + self.radius as isize - 1;
-            vertical_block::<VECTORS>(
-                d1_1,
-                d1_3,
-                d1_5,
-                n2_1,
-                n2_3,
-                n2_5,
-                &VertBlockInput::TwoInputs((
-                    &input[(top as usize * width + x)..],
-                    &input[(bottom as usize * width + x)..],
-                )),
-                &mut ctr,
-                &mut ring_buffer,
-                &mut VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
-            );
+            // SAFETY: We know that the indexes can never be outside the bounds of the data
+            unsafe {
+                vertical_block::<VECTORS>(
+                    d1_1,
+                    d1_3,
+                    d1_5,
+                    n2_1,
+                    n2_3,
+                    n2_5,
+                    &VertBlockInput::TwoInputs((
+                        {
+                            let start = top as usize * width + x;
+                            slice::from_raw_parts(input.as_ptr().add(start), input.len() - start)
+                        },
+                        {
+                            let start = bottom as usize * width + x;
+                            slice::from_raw_parts(input.as_ptr().add(start), input.len() - start)
+                        },
+                    )),
+                    &mut ctr,
+                    &mut ring_buffer,
+                    &mut VertBlockOutput::Store({
+                        let start = n as usize * width + x;
+                        slice::from_raw_parts_mut(
+                            output.as_mut_ptr().add(start),
+                            output.len() - start,
+                        )
+                    }),
+                );
+            }
             // TODO: Use https://doc.rust-lang.org/std/intrinsics/fn.prefetch_read_data.html when stabilized
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             {
@@ -379,14 +409,16 @@ impl RecursiveGaussian {
                 // SAFETY: We checked the target arch before calling this
                 unsafe {
                     _mm_prefetch(
-                        input[((top as usize + V_PREFETCH_ROWS) * width + x)..]
+                        input
                             .as_ptr()
+                            .add((top as usize + V_PREFETCH_ROWS) * width + x)
                             .cast(),
                         _MM_HINT_T0,
                     );
                     _mm_prefetch(
-                        input[((bottom as usize + V_PREFETCH_ROWS) * width + x)..]
+                        input
                             .as_ptr()
+                            .add((bottom as usize + V_PREFETCH_ROWS) * width + x)
                             .cast(),
                         _MM_HINT_T0,
                     );
@@ -399,25 +431,43 @@ impl RecursiveGaussian {
         while (n as usize) < height {
             let top = n - self.radius as isize - 1;
             let bottom = n + self.radius as isize - 1;
-            vertical_block::<VECTORS>(
-                d1_1,
-                d1_3,
-                d1_5,
-                n2_1,
-                n2_3,
-                n2_5,
-                &VertBlockInput::TwoInputs((
-                    &input[(top as usize * width + x)..],
-                    if (bottom as usize) < height {
-                        &input[(bottom as usize * width + x)..]
-                    } else {
-                        zero.as_slice()
-                    },
-                )),
-                &mut ctr,
-                &mut ring_buffer,
-                &mut VertBlockOutput::Store(&mut output[(n as usize * width + x)..]),
-            );
+            // SAFETY: We know that the indexes can never be outside the bounds of the data
+            unsafe {
+                vertical_block::<VECTORS>(
+                    d1_1,
+                    d1_3,
+                    d1_5,
+                    n2_1,
+                    n2_3,
+                    n2_5,
+                    &VertBlockInput::TwoInputs((
+                        {
+                            let start = top as usize * width + x;
+                            slice::from_raw_parts(input.as_ptr().add(start), input.len() - start)
+                        },
+                        if (bottom as usize) < height {
+                            {
+                                let start = bottom as usize * width + x;
+                                slice::from_raw_parts(
+                                    input.as_ptr().add(start),
+                                    input.len() - start,
+                                )
+                            }
+                        } else {
+                            zero.as_slice()
+                        },
+                    )),
+                    &mut ctr,
+                    &mut ring_buffer,
+                    &mut VertBlockOutput::Store({
+                        let start = n as usize * width + x;
+                        slice::from_raw_parts_mut(
+                            output.as_mut_ptr().add(start),
+                            output.len() - start,
+                        )
+                    }),
+                );
+            }
             n += 1;
         }
     }
@@ -459,27 +509,60 @@ fn vertical_block<const VECTORS: usize>(
     for idx_vec in 0..VECTORS {
         let sum = input.get(idx_vec * V_MAX_LANES);
 
-        let y_n1_1 = &y_1[(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES)..];
-        let y_n1_1 = f32x4::from([y_n1_1[0], y_n1_1[1], y_n1_1[2], y_n1_1[3]]);
-        let y_n1_3 = &y_3[(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES)..];
-        let y_n1_3 = f32x4::from([y_n1_3[0], y_n1_3[1], y_n1_3[2], y_n1_3[3]]);
-        let y_n1_5 = &y_5[(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES)..];
-        let y_n1_5 = f32x4::from([y_n1_5[0], y_n1_5[1], y_n1_5[2], y_n1_5[3]]);
-        let y_n2_1 = &y_1[(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES)..];
-        let y_n2_1 = f32x4::from([y_n2_1[0], y_n2_1[1], y_n2_1[2], y_n2_1[3]]);
-        let y_n2_3 = &y_3[(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES)..];
-        let y_n2_3 = f32x4::from([y_n2_3[0], y_n2_3[1], y_n2_3[2], y_n2_3[3]]);
-        let y_n2_5 = &y_5[(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES)..];
-        let y_n2_5 = f32x4::from([y_n2_5[0], y_n2_5[1], y_n2_5[2], y_n2_5[3]]);
+        // SAFETY: We know the indexes cannot exceed the bounds
+        unsafe {
+            let y_n1_1 = slice::from_raw_parts(
+                y_1.as_ptr()
+                    .add(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES),
+                4,
+            );
+            let y_n1_1 = f32x4::from(y_n1_1);
+            let y_n1_3 = slice::from_raw_parts(
+                y_3.as_ptr()
+                    .add(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES),
+                4,
+            );
+            let y_n1_3 = f32x4::from(y_n1_3);
+            let y_n1_5 = slice::from_raw_parts(
+                y_5.as_ptr()
+                    .add(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES),
+                4,
+            );
+            let y_n1_5 = f32x4::from(y_n1_5);
+            let y_n2_1 = slice::from_raw_parts(
+                y_1.as_ptr()
+                    .add(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES),
+                4,
+            );
+            let y_n2_1 = f32x4::from(y_n2_1);
+            let y_n2_3 = slice::from_raw_parts(
+                y_3.as_ptr()
+                    .add(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES),
+                4,
+            );
+            let y_n2_3 = f32x4::from(y_n2_3);
+            let y_n2_5 = slice::from_raw_parts(
+                y_5.as_ptr()
+                    .add(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES),
+                4,
+            );
+            let y_n2_5 = f32x4::from(y_n2_5);
 
-        // (35)
-        let y1 = n2_1.mul_add(sum, d1_1.mul_neg_sub(y_n1_1, y_n2_1));
-        let y3 = n2_3.mul_add(sum, d1_3.mul_neg_sub(y_n1_3, y_n2_3));
-        let y5 = n2_5.mul_add(sum, d1_5.mul_neg_sub(y_n1_5, y_n2_5));
-        y_1[(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)..][..4].copy_from_slice(&y1.to_array());
-        y_3[(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)..][..4].copy_from_slice(&y3.to_array());
-        y_5[(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)..][..4].copy_from_slice(&y5.to_array());
-        output.write(y1 + y3 + y5, idx_vec * V_MAX_LANES);
+            // (35)
+            let y1 = n2_1.mul_add(sum, d1_1.mul_neg_sub(y_n1_1, y_n2_1));
+            let y3 = n2_3.mul_add(sum, d1_3.mul_neg_sub(y_n1_3, y_n2_3));
+            let y5 = n2_5.mul_add(sum, d1_5.mul_neg_sub(y_n1_5, y_n2_5));
+            y_1.as_mut_ptr()
+                .add(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)
+                .copy_from_nonoverlapping(y1.to_array().as_ptr(), 4);
+            y_3.as_mut_ptr()
+                .add(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)
+                .copy_from_nonoverlapping(y3.to_array().as_ptr(), 4);
+            y_5.as_mut_ptr()
+                .add(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)
+                .copy_from_nonoverlapping(y5.to_array().as_ptr(), 4);
+            output.write(y1 + y3 + y5, idx_vec * V_MAX_LANES);
+        }
     }
     // NOTE: flushing cache line out_pos hurts performance - less so with
     // clflushopt than clflush but still a significant slowdown.
@@ -493,10 +576,10 @@ enum VertBlockInput<'a> {
 impl<'a> VertBlockInput<'a> {
     pub fn get(&self, index: usize) -> f32x4 {
         match *self {
-            Self::SingleInput(input) => safe_load_f32x4(&input[index..]),
+            Self::SingleInput(input) => fast_load_f32x4(input, index),
             Self::TwoInputs((input1, input2)) => {
-                let data1 = safe_load_f32x4(&input1[index..]);
-                let data2 = safe_load_f32x4(&input2[index..]);
+                let data1 = fast_load_f32x4(input1, index);
+                let data2 = fast_load_f32x4(input2, index);
                 data1 + data2
             }
         }
@@ -513,24 +596,36 @@ impl<'a> VertBlockOutput<'a> {
         match *self {
             Self::None => (),
             Self::Store(ref mut output) => {
-                let output = &mut output[index..];
-                let rem = output.len().min(4);
-                output[..rem].copy_from_slice(&data.to_array()[..rem]);
+                let rem = (output.len() - index).min(4);
+                // SAFETY: We know that `index` and `rem` do not go out of bounds here because we control all inputs.
+                unsafe {
+                    output
+                        .as_mut_ptr()
+                        .add(index)
+                        .copy_from_nonoverlapping(data.to_array().as_ptr(), rem);
+                }
             }
         }
     }
 }
 
 #[inline(always)]
-fn safe_load_f32x4(arr: &[f32]) -> f32x4 {
-    if arr.len() >= 4 {
-        // Faster because it avoids copying
-        f32x4::from(*array_ref![arr, 0, 4])
+fn fast_load_f32x4(arr: &[f32], start_idx: usize) -> f32x4 {
+    let len = arr.len() - start_idx;
+    if len >= 4 {
+        // SAFETY: `len` must be at least 4 in this branch
+        unsafe {
+            // Faster because it avoids copying
+            f32x4::from(slice::from_raw_parts(arr.as_ptr().add(start_idx), 4))
+        }
     } else {
         // Slower but necessary for handling edges of the input
         let mut data = [0f32; 4];
-        let rem = arr.len();
-        data[..rem].copy_from_slice(&arr[..rem]);
+        // SAFETY: We calculated `len` to the appropriate value to not go out of bounds
+        unsafe {
+            data.as_mut_ptr()
+                .copy_from_nonoverlapping(arr.as_ptr().add(start_idx), len);
+        }
         f32x4::from(data)
     }
 }
