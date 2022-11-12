@@ -42,7 +42,7 @@
 mod blur;
 
 use anyhow::{bail, Result};
-use blur::Blur;
+pub use blur::Blur;
 pub use yuvxyb::{CastFromPrimitive, Frame, LinearRgb, Pixel, Plane, Rgb, Xyb, Yuv};
 pub use yuvxyb::{ColorPrimaries, MatrixCoefficients, TransferCharacteristic, YuvConfig};
 
