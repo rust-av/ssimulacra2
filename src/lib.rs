@@ -498,7 +498,7 @@ mod tests {
         )
         .unwrap();
         let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
-        let expected = 8.764_571_f64;
+        let expected = 8.754_078_f64;
         assert!(
             (result - expected).abs() < 0.01f64,
             "Result {:.6} not equal to expected {:.6}",
