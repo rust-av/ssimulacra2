@@ -1,8 +1,7 @@
-use std::{f64::consts::PI, mem::size_of, slice};
+use std::f64::consts::PI;
 
 use aligned::{Aligned, A16};
 use nalgebra::base::{Matrix3, Matrix3x1};
-use wide::f32x4;
 
 use rayon::slice::ParallelSlice;
 use rayon::prelude::ParallelSliceMut;
@@ -44,28 +43,23 @@ impl Blur {
         let mut out = vec![0f32; self.width * self.height];
         self.kernel
             .fast_gaussian_horizontal(plane, &mut self.temp, self.width);
-        self.kernel
-            .fast_gaussian_vertical(&self.temp, &mut out, self.width, self.height);
+        self.kernel.fast_gaussian_vertical_chunked::<128, 32>(
+            &self.temp,
+            &mut out,
+            self.width,
+            self.height,
+        );
         out
     }
 }
-
-const MAX_LANES: isize = 4;
-const V_CACHE_LINE_LANES: usize = 64 / size_of::<f32>();
-const V_MAX_LANES: usize = MAX_LANES as usize;
-const V_CACHE_LINE_VECTORS: usize = V_CACHE_LINE_LANES / V_MAX_LANES;
-const V_TOTAL_LANES: usize = V_CACHE_LINE_VECTORS * V_MAX_LANES;
-const V_MOD: usize = 4;
-const V_PREFETCH_ROWS: usize = 8;
 
 /// Implements "Recursive Implementation of the Gaussian Filter Using Truncated
 /// Cosine Functions" by Charalampidis [2016].
 struct RecursiveGaussian {
     radius: usize,
-    /// For k={1,3,5} in that order, each broadcasted 4x for LoadDup128. Used
-    /// only for vertical passes.
-    n2: Aligned<A16, [f32; 3 * 4]>,
-    d1: Aligned<A16, [f32; 3 * 4]>,
+    /// For k={1,3,5} in that order.
+    vert_mul_in: [f32; 3],
+    vert_mul_prev: [f32; 3],
     /// We unroll horizontal passes 4x - one output per lane. These are each
     /// lane's multiplier for the previous output (relative to the first of
     /// the four outputs). Indexing: 4 * 0..2 (for {1,3,5}) + 0..3 for the
@@ -137,8 +131,6 @@ impl RecursiveGaussian {
 
         let mut n2 = [0f64; 3];
         let mut d1 = [0f64; 3];
-        let mut rg_n2 = [0f32; 3 * 4];
-        let mut rg_d1 = [0f32; 3 * 4];
         let mut mul_prev = [0f32; 3 * 4];
         let mut mul_prev2 = [0f32; 3 * 4];
         let mut mul_in = [0f32; 3 * 4];
@@ -146,11 +138,6 @@ impl RecursiveGaussian {
             // (33)
             n2[i] = -beta[i] * (omega[i] * (radius + 1.0)).cos();
             d1[i] = -2.0f64 * omega[i].cos();
-
-            for lane in 0..4 {
-                rg_n2[4 * i + lane] = n2[i] as f32;
-                rg_d1[4 * i + lane] = d1[i] as f32;
-            }
 
             let d_2 = d1[i] * d1[i];
 
@@ -179,8 +166,8 @@ impl RecursiveGaussian {
 
         Self {
             radius: radius as usize,
-            n2: Aligned(rg_n2),
-            d1: Aligned(rg_d1),
+            vert_mul_in: n2.map(|f| f as f32),
+            vert_mul_prev: d1.map(|f| f as f32),
             mul_prev: Aligned(mul_prev),
             mul_prev2: Aligned(mul_prev2),
             mul_in: Aligned(mul_in),
@@ -261,8 +248,37 @@ impl RecursiveGaussian {
             });
     }
 
-    // Apply 1D vertical scan to multiple columns (one per vector lane).
-    pub fn fast_gaussian_vertical(
+    pub fn fast_gaussian_vertical_chunked<const J: usize, const K: usize>(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        width: usize,
+        height: usize,
+    ) {
+        assert!(J > K);
+        assert!(K > 0);
+
+        assert_eq!(input.len(), output.len());
+
+        let mut x = 0;
+        while x + J <= width {
+            self.fast_gaussian_vertical::<J>(&input[x..], &mut output[x..], width, height);
+            x += J;
+        }
+
+        while x + K <= width {
+            self.fast_gaussian_vertical::<K>(&input[x..], &mut output[x..], width, height);
+            x += K;
+        }
+
+        while x < width {
+            self.fast_gaussian_vertical::<1>(&input[x..], &mut output[x..], width, height);
+            x += 1;
+        }
+    }
+
+    // Apply 1D vertical scan on COLUMNS elements at a time
+    pub fn fast_gaussian_vertical<const COLUMNS: usize>(
         &self,
         input: &[f32],
         output: &mut [f32],
@@ -271,366 +287,65 @@ impl RecursiveGaussian {
     ) {
         assert_eq!(input.len(), output.len());
 
-        let mut x = 0;
-        while x + V_TOTAL_LANES <= width {
-            self.vertical_strip::<V_CACHE_LINE_VECTORS>(input, x, output, width, height);
-            x += V_TOTAL_LANES;
-        }
-        while x < width {
-            self.vertical_strip::<1>(input, x, output, width, height);
-            x += V_MAX_LANES;
-        }
-    }
+        let big_n = self.radius as isize;
 
-    #[allow(clippy::too_many_lines)]
-    fn vertical_strip<const VECTORS: usize>(
-        &self,
-        input: &[f32],
-        x: usize,
-        output: &mut [f32],
-        width: usize,
-        height: usize,
-    ) {
-        // We're iterating vertically, so use multiple full-length vectors (each
-        // lane is one column of row n).
-        //
-        // More cache-friendly to process an entirely cache line at a time
-        let d1_1 = f32x4::from([self.d1[0], self.d1[1], self.d1[2], self.d1[3]]);
-        let d1_3 = f32x4::from([self.d1[4], self.d1[5], self.d1[6], self.d1[7]]);
-        let d1_5 = f32x4::from([self.d1[8], self.d1[9], self.d1[10], self.d1[11]]);
-        let n2_1 = f32x4::from([self.n2[0], self.n2[1], self.n2[2], self.n2[3]]);
-        let n2_3 = f32x4::from([self.n2[4], self.n2[5], self.n2[6], self.n2[7]]);
-        let n2_5 = f32x4::from([self.n2[8], self.n2[9], self.n2[10], self.n2[11]]);
+        let zeroes = vec![0f32; COLUMNS];
+        let mut prev = vec![0f32; 3 * COLUMNS];
+        let mut prev2 = vec![0f32; 3 * COLUMNS];
+        let mut out = vec![0f32; 3 * COLUMNS];
 
-        let mut ctr = 0usize;
-        let mut ring_buffer: Aligned<A16, _> = Aligned([0f32; 3 * V_TOTAL_LANES * V_MOD]);
-        let zero: Aligned<A16, _> = Aligned([0f32; V_TOTAL_LANES]);
+        let mut n = (-big_n) + 1;
+        while n < height as isize {
+            let top = n - big_n - 1;
+            let bottom = n + big_n - 1;
+            let top_row = if top >= 0 {
+                &input[top as usize * width..][..COLUMNS]
+            } else {
+                &zeroes
+            };
 
-        // Warmup: top is out of bounds (zero padded), bottom is usually
-        // in-bounds.
-        let mut n = -(self.radius as isize) + 1;
-        while n < 0 {
-            // bottom is always non-negative since n is initialized in -N + 1.
-            let bottom = n + self.radius as isize - 1;
-            vertical_block::<VECTORS>(
-                d1_1,
-                d1_3,
-                d1_5,
-                n2_1,
-                n2_3,
-                n2_5,
-                &VertBlockInput::SingleInput(if bottom < height as isize {
-                    // SAFETY: We know that `start` can never be outside the bounds of `input`
-                    unsafe {
-                        let start = bottom as usize * width + x;
-                        slice::from_raw_parts(input.as_ptr().add(start), input.len() - start)
-                    }
-                } else {
-                    zero.as_slice()
-                }),
-                &mut ctr,
-                &mut ring_buffer,
-                &mut VertBlockOutput::None,
-            );
-            n += 1;
-        }
+            let bottom_row = if bottom < height as isize {
+                &input[bottom as usize * width..][..COLUMNS]
+            } else {
+                &zeroes
+            };
 
-        // Start producing output; top is still out of bounds.
-        while (n as usize) < (self.radius + 1).min(height) {
-            let bottom = n + self.radius as isize - 1;
-            // SAFETY: We know that the indexes can never be outside the bounds of the data
-            unsafe {
-                vertical_block::<VECTORS>(
-                    d1_1,
-                    d1_3,
-                    d1_5,
-                    n2_1,
-                    n2_3,
-                    n2_5,
-                    &VertBlockInput::SingleInput(if bottom < height as isize {
-                        {
-                            let start = bottom as usize * width + x;
-                            slice::from_raw_parts(input.as_ptr().add(start), input.len() - start)
-                        }
-                    } else {
-                        zero.as_slice()
-                    }),
-                    &mut ctr,
-                    &mut ring_buffer,
-                    &mut VertBlockOutput::Store({
-                        let start = n as usize * width + x;
-                        slice::from_raw_parts_mut(
-                            output.as_mut_ptr().add(start),
-                            output.len() - start,
-                        )
-                    }),
-                );
-            }
-            n += 1;
-        }
+            for i in 0..COLUMNS {
+                let sum = top_row[i] + bottom_row[i];
 
-        // Interior outputs with prefetching and without bounds checks.
-        while n < (height as isize - self.radius as isize + 1 - V_PREFETCH_ROWS as isize) {
-            let top = n - self.radius as isize - 1;
-            let bottom = n + self.radius as isize - 1;
-            // SAFETY: We know that the indexes can never be outside the bounds of the data
-            unsafe {
-                vertical_block::<VECTORS>(
-                    d1_1,
-                    d1_3,
-                    d1_5,
-                    n2_1,
-                    n2_3,
-                    n2_5,
-                    &VertBlockInput::TwoInputs((
-                        {
-                            let start = top as usize * width + x;
-                            slice::from_raw_parts(input.as_ptr().add(start), input.len() - start)
-                        },
-                        {
-                            let start = bottom as usize * width + x;
-                            slice::from_raw_parts(input.as_ptr().add(start), input.len() - start)
-                        },
-                    )),
-                    &mut ctr,
-                    &mut ring_buffer,
-                    &mut VertBlockOutput::Store({
-                        let start = n as usize * width + x;
-                        slice::from_raw_parts_mut(
-                            output.as_mut_ptr().add(start),
-                            output.len() - start,
-                        )
-                    }),
-                );
-            }
-            // TODO: Use https://doc.rust-lang.org/std/intrinsics/fn.prefetch_read_data.html when stabilized
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                #[cfg(target_arch = "x86")]
-                use core::arch::x86::{_mm_prefetch, _MM_HINT_T0};
-                #[cfg(target_arch = "x86_64")]
-                use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+                let i1 = i;
+                let i3 = i1 + COLUMNS;
+                let i5 = i3 + COLUMNS;
 
-                // SAFETY: We checked the target arch before calling this
-                unsafe {
-                    _mm_prefetch(
-                        input
-                            .as_ptr()
-                            .add((top as usize + V_PREFETCH_ROWS) * width + x)
-                            .cast(),
-                        _MM_HINT_T0,
-                    );
-                    _mm_prefetch(
-                        input
-                            .as_ptr()
-                            .add((bottom as usize + V_PREFETCH_ROWS) * width + x)
-                            .cast(),
-                        _MM_HINT_T0,
-                    );
+                let mp1 = self.vert_mul_prev[0];
+                let mp3 = self.vert_mul_prev[1];
+                let mp5 = self.vert_mul_prev[2];
+
+                let out1 = prev[i1].mul_add(mp1, prev2[i1]);
+                let out3 = prev[i3].mul_add(mp3, prev2[i3]);
+                let out5 = prev[i5].mul_add(mp5, prev2[i5]);
+
+                let mi1 = self.vert_mul_in[0];
+                let mi3 = self.vert_mul_in[1];
+                let mi5 = self.vert_mul_in[2];
+
+                let out1 = sum.mul_add(mi1, -out1);
+                let out3 = sum.mul_add(mi3, -out3);
+                let out5 = sum.mul_add(mi5, -out5);
+
+                out[i1] = out1;
+                out[i3] = out3;
+                out[i5] = out5;
+
+                if n >= 0 {
+                    output[n as usize * width + i] = out1 + out3 + out5;
                 }
             }
+
+            prev2.copy_from_slice(&prev);
+            prev.copy_from_slice(&out);
+
             n += 1;
         }
-
-        // Bottom border without prefetching and with bounds checks.
-        while (n as usize) < height {
-            let top = n - self.radius as isize - 1;
-            let bottom = n + self.radius as isize - 1;
-            // SAFETY: We know that the indexes can never be outside the bounds of the data
-            unsafe {
-                vertical_block::<VECTORS>(
-                    d1_1,
-                    d1_3,
-                    d1_5,
-                    n2_1,
-                    n2_3,
-                    n2_5,
-                    &VertBlockInput::TwoInputs((
-                        {
-                            let start = top as usize * width + x;
-                            slice::from_raw_parts(input.as_ptr().add(start), input.len() - start)
-                        },
-                        if (bottom as usize) < height {
-                            {
-                                let start = bottom as usize * width + x;
-                                slice::from_raw_parts(
-                                    input.as_ptr().add(start),
-                                    input.len() - start,
-                                )
-                            }
-                        } else {
-                            zero.as_slice()
-                        },
-                    )),
-                    &mut ctr,
-                    &mut ring_buffer,
-                    &mut VertBlockOutput::Store({
-                        let start = n as usize * width + x;
-                        slice::from_raw_parts_mut(
-                            output.as_mut_ptr().add(start),
-                            output.len() - start,
-                        )
-                    }),
-                );
-            }
-            n += 1;
-        }
-    }
-}
-
-// Block := `VECTORS` consecutive full vectors (one cache line except on the
-// right boundary, where we can only rely on having one vector). Unrolling to
-// the cache line size improves cache utilization.
-#[allow(clippy::too_many_arguments)]
-fn vertical_block<const VECTORS: usize>(
-    d1_1: f32x4,
-    d1_3: f32x4,
-    d1_5: f32x4,
-    n2_1: f32x4,
-    n2_3: f32x4,
-    n2_5: f32x4,
-    input: &VertBlockInput,
-    ctr: &mut usize,
-    ring_buffer: &mut Aligned<A16, [f32; 3 * V_TOTAL_LANES * V_MOD]>,
-    output: &mut VertBlockOutput,
-) {
-    let mut ring_chunks = ring_buffer.chunks_exact_mut(V_TOTAL_LANES * V_MOD);
-    let y_1 = ring_chunks.next().expect("there are 3 chunks");
-    let y_3 = ring_chunks.next().expect("there are 3 chunks");
-    let y_5 = ring_chunks.next().expect("there are 3 chunks");
-
-    *ctr += 1;
-    let n_0 = *ctr % V_MOD;
-    let n_1 = (*ctr - 1) % V_MOD;
-    let n_2 = if *ctr == 1 {
-        // During the first iteration, `ctr` will be `1`, and we will end up with `-1 % 4`.
-        // The result this gives in Rust is different than the result it gives in C.
-        // So we just manually handle that case.
-        3
-    } else {
-        (*ctr - 2) % V_MOD
-    };
-
-    for idx_vec in 0..VECTORS {
-        let sum = input.get(idx_vec * V_MAX_LANES);
-
-        // SAFETY: We know the indexes cannot exceed the bounds
-        unsafe {
-            let y_n1_1 = slice::from_raw_parts(
-                y_1.as_ptr()
-                    .add(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES),
-                4,
-            );
-            let y_n1_1 = f32x4::from(y_n1_1);
-            let y_n1_3 = slice::from_raw_parts(
-                y_3.as_ptr()
-                    .add(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES),
-                4,
-            );
-            let y_n1_3 = f32x4::from(y_n1_3);
-            let y_n1_5 = slice::from_raw_parts(
-                y_5.as_ptr()
-                    .add(V_TOTAL_LANES * n_1 + idx_vec * V_MAX_LANES),
-                4,
-            );
-            let y_n1_5 = f32x4::from(y_n1_5);
-            let y_n2_1 = slice::from_raw_parts(
-                y_1.as_ptr()
-                    .add(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES),
-                4,
-            );
-            let y_n2_1 = f32x4::from(y_n2_1);
-            let y_n2_3 = slice::from_raw_parts(
-                y_3.as_ptr()
-                    .add(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES),
-                4,
-            );
-            let y_n2_3 = f32x4::from(y_n2_3);
-            let y_n2_5 = slice::from_raw_parts(
-                y_5.as_ptr()
-                    .add(V_TOTAL_LANES * n_2 + idx_vec * V_MAX_LANES),
-                4,
-            );
-            let y_n2_5 = f32x4::from(y_n2_5);
-
-            // (35)
-            let y1 = n2_1.mul_add(sum, d1_1.mul_neg_sub(y_n1_1, y_n2_1));
-            let y3 = n2_3.mul_add(sum, d1_3.mul_neg_sub(y_n1_3, y_n2_3));
-            let y5 = n2_5.mul_add(sum, d1_5.mul_neg_sub(y_n1_5, y_n2_5));
-            y_1.as_mut_ptr()
-                .add(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)
-                .copy_from_nonoverlapping(y1.to_array().as_ptr(), 4);
-            y_3.as_mut_ptr()
-                .add(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)
-                .copy_from_nonoverlapping(y3.to_array().as_ptr(), 4);
-            y_5.as_mut_ptr()
-                .add(V_TOTAL_LANES * n_0 + idx_vec * V_MAX_LANES)
-                .copy_from_nonoverlapping(y5.to_array().as_ptr(), 4);
-            output.write(y1 + y3 + y5, idx_vec * V_MAX_LANES);
-        }
-    }
-    // NOTE: flushing cache line out_pos hurts performance - less so with
-    // clflushopt than clflush but still a significant slowdown.
-}
-
-enum VertBlockInput<'a> {
-    SingleInput(&'a [f32]),
-    TwoInputs((&'a [f32], &'a [f32])),
-}
-
-impl<'a> VertBlockInput<'a> {
-    pub fn get(&self, index: usize) -> f32x4 {
-        match *self {
-            Self::SingleInput(input) => fast_load_f32x4(input, index),
-            Self::TwoInputs((input1, input2)) => {
-                let data1 = fast_load_f32x4(input1, index);
-                let data2 = fast_load_f32x4(input2, index);
-                data1 + data2
-            }
-        }
-    }
-}
-
-enum VertBlockOutput<'a> {
-    None,
-    Store(&'a mut [f32]),
-}
-
-impl<'a> VertBlockOutput<'a> {
-    pub fn write(&mut self, data: f32x4, index: usize) {
-        match *self {
-            Self::None => (),
-            Self::Store(ref mut output) => {
-                let rem = (output.len() - index).min(4);
-                // SAFETY: We know that `index` and `rem` do not go out of bounds here because we control all inputs.
-                unsafe {
-                    output
-                        .as_mut_ptr()
-                        .add(index)
-                        .copy_from_nonoverlapping(data.to_array().as_ptr(), rem);
-                }
-            }
-        }
-    }
-}
-
-#[inline(always)]
-fn fast_load_f32x4(arr: &[f32], start_idx: usize) -> f32x4 {
-    let len = arr.len() - start_idx;
-    if len >= 4 {
-        // SAFETY: `len` must be at least 4 in this branch
-        unsafe {
-            // Faster because it avoids copying
-            f32x4::from(slice::from_raw_parts(arr.as_ptr().add(start_idx), 4))
-        }
-    } else {
-        // Slower but necessary for handling edges of the input
-        let mut data = [0f32; 4];
-        // SAFETY: We calculated `len` to the appropriate value to not go out of bounds
-        unsafe {
-            data.as_mut_ptr()
-                .copy_from_nonoverlapping(arr.as_ptr().add(start_idx), len);
-        }
-        f32x4::from(data)
     }
 }
