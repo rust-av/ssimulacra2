@@ -19,6 +19,7 @@ nalgebra = "0.31.1"
 num-traits = "0.2.15"
 wide = "0.7.5"
 yuvxyb = "0.2.1"
+rayon = "1.5.3"
 
 [dev-dependencies]
 criterion = "0.4.0"
