@@ -17,6 +17,7 @@ anyhow = "1.0.0"
 arrayref = "0.3.6"
 nalgebra = "0.31.1"
 num-traits = "0.2.15"
+rayon = "1.5.3"
 wide = "0.7.5"
 yuvxyb = "0.2.1"
 

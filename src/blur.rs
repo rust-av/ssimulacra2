@@ -4,6 +4,11 @@ use aligned::{Aligned, A16};
 use nalgebra::base::{Matrix3, Matrix3x1};
 use wide::f32x4;
 
+use rayon::slice::ParallelSlice;
+use rayon::prelude::ParallelSliceMut;
+use rayon::iter::IndexedParallelIterator;
+use rayon::iter::ParallelIterator;
+
 pub struct Blur {
     kernel: RecursiveGaussian,
     temp: Vec<f32>,
@@ -186,74 +191,74 @@ impl RecursiveGaussian {
     pub fn fast_gaussian_horizontal(&self, input: &[f32], output: &mut [f32], width: usize) {
         assert_eq!(input.len(), output.len());
 
-        let big_n = self.radius as isize;
-        for (input, output) in input
-            .chunks_exact(width)
-            .zip(output.chunks_exact_mut(width))
-        {
-            let mul_in_1 = self.mul_in[0];
-            let mul_in_3 = self.mul_in[4];
-            let mul_in_5 = self.mul_in[8];
-            let mul_prev_1 = self.mul_prev[0];
-            let mul_prev_3 = self.mul_prev[4];
-            let mul_prev_5 = self.mul_prev[8];
-            let mul_prev2_1 = self.mul_prev2[0];
-            let mul_prev2_3 = self.mul_prev2[4];
-            let mul_prev2_5 = self.mul_prev2[8];
-            let mut prev_1 = 0f32;
-            let mut prev_3 = 0f32;
-            let mut prev_5 = 0f32;
-            let mut prev2_1 = 0f32;
-            let mut prev2_3 = 0f32;
-            let mut prev2_5 = 0f32;
+        input
+            .par_chunks_exact(width)
+            .zip(output.par_chunks_exact_mut(width))
+            .for_each(|(input, output)| {
+                let big_n = self.radius as isize;
+                let mul_in_1 = self.mul_in[0];
+                let mul_in_3 = self.mul_in[4];
+                let mul_in_5 = self.mul_in[8];
+                let mul_prev_1 = self.mul_prev[0];
+                let mul_prev_3 = self.mul_prev[4];
+                let mul_prev_5 = self.mul_prev[8];
+                let mul_prev2_1 = self.mul_prev2[0];
+                let mul_prev2_3 = self.mul_prev2[4];
+                let mul_prev2_5 = self.mul_prev2[8];
+                let mut prev_1 = 0f32;
+                let mut prev_3 = 0f32;
+                let mut prev_5 = 0f32;
+                let mut prev2_1 = 0f32;
+                let mut prev2_3 = 0f32;
+                let mut prev2_5 = 0f32;
 
-            let mut n = (-big_n) + 1;
-            while n < width as isize {
-                let left = n - big_n - 1;
-                let right = n + big_n - 1;
-                let left_val = if left >= 0 {
-                    // SAFETY: `left` can never be bigger than `width`
-                    unsafe { *input.get_unchecked(left as usize) }
-                } else {
-                    0f32
-                };
-                let right_val = if right < width as isize {
-                    // SAFETY: this branch ensures that `right` is not bigger than `width`
-                    unsafe { *input.get_unchecked(right as usize) }
-                } else {
-                    0f32
-                };
-                let sum = left_val + right_val;
+                let mut n = (-big_n) + 1;
+                while n < width as isize {
+                    let left = n - big_n - 1;
+                    let right = n + big_n - 1;
+                    let left_val = if left >= 0 {
+                        // SAFETY: `left` can never be bigger than `width`
+                        unsafe { *input.get_unchecked(left as usize) }
+                    } else {
+                        0f32
+                    };
+                    let right_val = if right < width as isize {
+                        // SAFETY: this branch ensures that `right` is not bigger than `width`
+                        unsafe { *input.get_unchecked(right as usize) }
+                    } else {
+                        0f32
+                    };
+                    let sum = left_val + right_val;
 
-                let mut out_1 = sum * mul_in_1;
-                let mut out_3 = sum * mul_in_3;
-                let mut out_5 = sum * mul_in_5;
+                    let mut out_1 = sum * mul_in_1;
+                    let mut out_3 = sum * mul_in_3;
+                    let mut out_5 = sum * mul_in_5;
 
-                out_1 = mul_prev2_1.mul_add(prev2_1, out_1);
-                out_3 = mul_prev2_3.mul_add(prev2_3, out_3);
-                out_5 = mul_prev2_5.mul_add(prev2_5, out_5);
-                prev2_1 = prev_1;
-                prev2_3 = prev_3;
-                prev2_5 = prev_5;
+                    out_1 = mul_prev2_1.mul_add(prev2_1, out_1);
+                    out_3 = mul_prev2_3.mul_add(prev2_3, out_3);
+                    out_5 = mul_prev2_5.mul_add(prev2_5, out_5);
+                    prev2_1 = prev_1;
+                    prev2_3 = prev_3;
+                    prev2_5 = prev_5;
 
-                out_1 = mul_prev_1.mul_add(prev_1, out_1);
-                out_3 = mul_prev_3.mul_add(prev_3, out_3);
-                out_5 = mul_prev_5.mul_add(prev_5, out_5);
-                prev_1 = out_1;
-                prev_3 = out_3;
-                prev_5 = out_5;
+                    out_1 = mul_prev_1.mul_add(prev_1, out_1);
+                    out_3 = mul_prev_3.mul_add(prev_3, out_3);
+                    out_5 = mul_prev_5.mul_add(prev_5, out_5);
+                    prev_1 = out_1;
+                    prev_3 = out_3;
+                    prev_5 = out_5;
 
-                if n >= 0 {
-                    // SAFETY: We know that this chunk of output is of size `width`,
-                    // which `n` cannot be larger than.
-                    unsafe {
-                        *output.get_unchecked_mut(n as usize) = out_1 + out_3 + out_5;
+                    if n >= 0 {
+                        // SAFETY: We know that this chunk of output is of size `width`,
+                        // which `n` cannot be larger than.
+                        unsafe {
+                            *output.get_unchecked_mut(n as usize) = out_1 + out_3 + out_5;
+                        }
                     }
-                }
 
-                n += 1;
-            }
-        }
+                    n += 1;
+                }
+            });
     }
 
     // Apply 1D vertical scan to multiple columns (one per vector lane).
