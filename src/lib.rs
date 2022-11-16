@@ -101,8 +101,8 @@ pub fn compute_frame_ssimulacra2<T: TryInto<LinearRgb>, U: TryInto<LinearRgb>>(
         }
         blur.shrink_to(width, height);
 
-        let mut img1 = Xyb::from(&img1);
-        let mut img2 = Xyb::from(&img2);
+        let mut img1 = Xyb::from(img1.clone());
+        let mut img2 = Xyb::from(img2.clone());
 
         make_positive_xyb(&mut img1);
         make_positive_xyb(&mut img2);
