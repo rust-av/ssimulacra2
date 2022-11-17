@@ -3,10 +3,10 @@ use std::f64::consts::PI;
 use aligned::{Aligned, A16};
 use nalgebra::base::{Matrix3, Matrix3x1};
 
-use rayon::slice::ParallelSlice;
-use rayon::prelude::ParallelSliceMut;
 use rayon::iter::IndexedParallelIterator;
 use rayon::iter::ParallelIterator;
+use rayon::prelude::ParallelSliceMut;
+use rayon::slice::ParallelSlice;
 
 pub struct Blur {
     kernel: RecursiveGaussian,
@@ -16,6 +16,7 @@ pub struct Blur {
 }
 
 impl Blur {
+    #[must_use]
     pub fn new(width: usize, height: usize) -> Self {
         Blur {
             kernel: RecursiveGaussian::new(),

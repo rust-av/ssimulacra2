@@ -2,8 +2,8 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use num_traits::clamp;
 use rand::Rng;
 use ssimulacra2::{
-    compute_frame_ssimulacra2, ColorPrimaries, Frame, MatrixCoefficients, Plane,
-    TransferCharacteristic, Yuv, YuvConfig, Blur,
+    compute_frame_ssimulacra2, Blur, ColorPrimaries, Frame, MatrixCoefficients, Plane,
+    TransferCharacteristic, Yuv, YuvConfig,
 };
 
 fn make_yuv(
@@ -93,13 +93,13 @@ fn bench_ssimulacra2(c: &mut Criterion) {
     });
 }
 
-fn read_image(path: &str) -> ([Vec<f32>;3], usize, usize) {
+fn read_image(path: &str) -> ([Vec<f32>; 3], usize, usize) {
     // Read in test_data/tank_source.png
     let img = image::open(path).unwrap();
-        
+
     let img = match img {
         image::DynamicImage::ImageRgb8(img) => img,
-        x => x.to_rgb8()
+        x => x.to_rgb8(),
     };
 
     let (width, height) = img.dimensions();
@@ -118,7 +118,7 @@ fn read_image(path: &str) -> ([Vec<f32>;3], usize, usize) {
 fn bench_blur(c: &mut Criterion) {
     c.bench_function("blur", |b| {
         let (image, width, height) = read_image("test_data/tank_source.png");
-        
+
         // Blur the image
         let mut blur = Blur::new(width, height);
 
