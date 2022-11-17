@@ -184,6 +184,17 @@ impl RecursiveGaussian {
             .for_each(|(input, output)| self.horizontal_row(input, output, width));
     }
 
+    #[cfg(not(feature = "rayon"))]
+    pub fn fast_gaussian_horizontal(&self, input: &[f32], output: &mut [f32], width: usize) {
+        assert_eq!(input.len(), output.len());
+
+        for (input, output) in input.chunks_exact(width)
+                                    .zip(output.chunks_exact_mut(width))
+        {
+            self.horizontal_row(input, output, width);
+        }
+    }
+
     fn horizontal_row(&self, input: &[f32], output: &mut [f32], width: usize) {
         let big_n = self.radius as isize;
         let mul_in_1 = self.mul_in[0];
