@@ -38,8 +38,8 @@ impl Blur {
     fn blur_plane(&mut self, plane: &[f32]) -> Vec<f32> {
         let mut out = vec![0f32; self.width * self.height];
         self.kernel
-            .fast_gaussian_horizontal(plane, &mut self.temp, self.width);
-        self.kernel.fast_gaussian_vertical_chunked::<128, 32>(
+            .horizontal_pass(plane, &mut self.temp, self.width);
+        self.kernel.vertical_pass_chunked::<128, 32>(
             &self.temp,
             &mut out,
             self.width,
@@ -171,7 +171,7 @@ impl RecursiveGaussian {
     }
 
     #[cfg(feature = "rayon")]
-    pub fn fast_gaussian_horizontal(&self, input: &[f32], output: &mut [f32], width: usize) {
+    pub fn horizontal_pass(&self, input: &[f32], output: &mut [f32], width: usize) {
         use rayon::iter::{IndexedParallelIterator, ParallelIterator};
         use rayon::prelude::ParallelSliceMut;
         use rayon::slice::ParallelSlice;
@@ -185,7 +185,7 @@ impl RecursiveGaussian {
     }
 
     #[cfg(not(feature = "rayon"))]
-    pub fn fast_gaussian_horizontal(&self, input: &[f32], output: &mut [f32], width: usize) {
+    pub fn horizontal_pass(&self, input: &[f32], output: &mut [f32], width: usize) {
         assert_eq!(input.len(), output.len());
 
         for (input, output) in input.chunks_exact(width)
@@ -261,7 +261,7 @@ impl RecursiveGaussian {
         }
     }
 
-    pub fn fast_gaussian_vertical_chunked<const J: usize, const K: usize>(
+    pub fn vertical_pass_chunked<const J: usize, const K: usize>(
         &self,
         input: &[f32],
         output: &mut [f32],
@@ -275,23 +275,23 @@ impl RecursiveGaussian {
 
         let mut x = 0;
         while x + J <= width {
-            self.fast_gaussian_vertical::<J>(&input[x..], &mut output[x..], width, height);
+            self.vertical_pass::<J>(&input[x..], &mut output[x..], width, height);
             x += J;
         }
 
         while x + K <= width {
-            self.fast_gaussian_vertical::<K>(&input[x..], &mut output[x..], width, height);
+            self.vertical_pass::<K>(&input[x..], &mut output[x..], width, height);
             x += K;
         }
 
         while x < width {
-            self.fast_gaussian_vertical::<1>(&input[x..], &mut output[x..], width, height);
+            self.vertical_pass::<1>(&input[x..], &mut output[x..], width, height);
             x += 1;
         }
     }
 
     // Apply 1D vertical scan on COLUMNS elements at a time
-    pub fn fast_gaussian_vertical<const COLUMNS: usize>(
+    pub fn vertical_pass<const COLUMNS: usize>(
         &self,
         input: &[f32],
         output: &mut [f32],
