@@ -232,7 +232,8 @@ fn ssim_map(
                 let mu11 = mu1 * mu1;
                 let mu22 = mu2 * mu2;
                 let mu12 = mu1 * mu2;
-                let num_m = 1.0f32 - (mu1 - mu2).powi(2);
+                let mu_diff = mu1 - mu2;
+                let num_m = mu_diff.mul_add(-mu_diff, 1.0f32);
                 let num_s = 2f32.mul_add(row_s12[x] - mu12, C2);
                 let denom_s = (row_s11[x] - mu11) + (row_s22[x] - mu22) + C2;
                 let mut d = 1.0f64 - f64::from((num_m * num_s) / denom_s);
@@ -422,20 +423,22 @@ impl Msssim {
         for c in 0..3 {
             for scale in &self.scales {
                 for n in 0..2 {
-                    ssim += WEIGHT[i] * scale.avg_ssim[c * 2 + n].abs();
+                    ssim = WEIGHT[i].mul_add(scale.avg_ssim[c * 2 + n].abs(), ssim);
                     i += 1;
-                    ssim += WEIGHT[i] * scale.avg_edgediff[c * 4 + n].abs();
+                    ssim = WEIGHT[i].mul_add(scale.avg_edgediff[c * 4 + n].abs(), ssim);
                     i += 1;
-                    ssim += WEIGHT[i] * scale.avg_edgediff[c * 4 + n + 2].abs();
+                    ssim = WEIGHT[i].mul_add(scale.avg_edgediff[c * 4 + n + 2].abs(), ssim);
                     i += 1;
                 }
             }
         }
 
-        ssim = ssim * 17.829_717_797_575_952_f64 - 1.634_169_143_917_183_f64;
+        ssim = ssim.mul_add(17.829_717_797_575_952_f64, -1.634_169_143_917_183_f64);
 
         if ssim > 0.0f64 {
-            ssim = 100.0f64 - 10.0f64 * ssim.powf(0.545_326_100_951_021_3_f64);
+            ssim = ssim
+                .powf(0.545_326_100_951_021_3_f64)
+                .mul_add(-10.0f64, 100.0f64);
         } else {
             ssim = 100.0f64;
         }
