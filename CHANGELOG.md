@@ -1,3 +1,8 @@
+## Version 0.3.1
+
+- Minor optimizations
+- Bump `nalgebra` dependency to 0.32
+
 ## Version 0.3.0
 
 - [Breaking] Reexported structs from yuvxyb have had `From<&T>` impls removed

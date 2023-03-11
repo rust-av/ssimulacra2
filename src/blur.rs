@@ -39,12 +39,8 @@ impl Blur {
         let mut out = vec![0f32; self.width * self.height];
         self.kernel
             .horizontal_pass(plane, &mut self.temp, self.width);
-        self.kernel.vertical_pass_chunked::<128, 32>(
-            &self.temp,
-            &mut out,
-            self.width,
-            self.height,
-        );
+        self.kernel
+            .vertical_pass_chunked::<128, 32>(&self.temp, &mut out, self.width, self.height);
         out
     }
 }
@@ -98,9 +94,9 @@ impl RecursiveGaussian {
         }
 
         // second part of (52), k1,k2 = 1,3; 3,5; 5,1
-        let d_13 = p_1 * r_3 - r_1 * p_3;
-        let d_35 = p_3 * r_5 - r_3 * p_5;
-        let d_51 = p_5 * r_1 - r_5 * p_1;
+        let d_13 = p_1.mul_add(r_3, -r_1 * p_3);
+        let d_35 = p_3.mul_add(r_5, -r_3 * p_5);
+        let d_51 = p_5.mul_add(r_1, -r_5 * p_1);
 
         // (52), k=5
         let recip_d13 = 1.0f64 / d_13;
@@ -114,7 +110,7 @@ impl RecursiveGaussian {
         // (55)
         let gamma = Matrix3x1::from_column_slice(&[
             1.0f64,
-            radius * radius - SIGMA * SIGMA,
+            radius.mul_add(radius, -SIGMA * SIGMA),
             zeta_15.mul_add(rho[0], zeta_35 * rho[1]) + rho[2],
         ]);
         // (53)
@@ -149,14 +145,14 @@ impl RecursiveGaussian {
             mul_prev[4 * i] = -d1[i] as f32;
             mul_prev[4 * i + 1] = (d_2 - 1.0f64) as f32;
             mul_prev[4 * i + 2] = (-d_2).mul_add(d1[i], 2.0f64 * d1[i]) as f32;
-            mul_prev[4 * i + 3] = (d_2 * d_2 - 3.0f64 * d_2 + 1.0f64) as f32;
+            mul_prev[4 * i + 3] = d_2.mul_add(d_2, 3.0f64.mul_add(-d_2, 1.0f64)) as f32;
             mul_prev2[4 * i] = -1.0f32;
             mul_prev2[4 * i + 1] = d1[i] as f32;
             mul_prev2[4 * i + 2] = (-d_2 + 1.0f64) as f32;
-            mul_prev2[4 * i + 3] = (d_2 * d1[i] - 2.0f64 * d1[i]) as f32;
+            mul_prev2[4 * i + 3] = d_2.mul_add(d1[i], -2.0f64 * d1[i]) as f32;
             mul_in[4 * i] = n2[i] as f32;
             mul_in[4 * i + 1] = (-d1[i] * n2[i]) as f32;
-            mul_in[4 * i + 2] = (d_2 * n2[i] - n2[i]) as f32;
+            mul_in[4 * i + 2] = d_2.mul_add(n2[i], -n2[i]) as f32;
             mul_in[4 * i + 3] = (-d_2 * d1[i]).mul_add(n2[i], 2.0f64 * d1[i] * n2[i]) as f32;
         }
 
@@ -188,8 +184,9 @@ impl RecursiveGaussian {
     pub fn horizontal_pass(&self, input: &[f32], output: &mut [f32], width: usize) {
         assert_eq!(input.len(), output.len());
 
-        for (input, output) in input.chunks_exact(width)
-                                    .zip(output.chunks_exact_mut(width))
+        for (input, output) in input
+            .chunks_exact(width)
+            .zip(output.chunks_exact_mut(width))
         {
             self.horizontal_row(input, output, width);
         }
