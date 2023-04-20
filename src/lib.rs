@@ -135,11 +135,22 @@ pub fn compute_frame_ssimulacra2<T: TryInto<LinearRgb>, U: TryInto<LinearRgb>>(
     Ok(msssim.score())
 }
 
+// Get all components in more or less 0..1 range
+// Range of Rec2020 with these adjustments:
+//  X: 0.017223..0.998838
+//  Y: 0.010000..0.855303
+//  B: 0.048759..0.989551
+// Range of sRGB:
+//  X: 0.204594..0.813402
+//  Y: 0.010000..0.855308
+//  B: 0.272295..0.938012
+// The maximum pixel-wise difference has to be <= 1 for the ssim formula to make
+// sense.
 fn make_positive_xyb(xyb: &mut Xyb) {
     for pix in xyb.data_mut().iter_mut() {
-        pix[2] += 1.1f32 - pix[1];
-        pix[0] += 0.5f32;
-        pix[1] += 0.05f32;
+        pix[2] = (pix[2] - pix[1]) + 0.55;
+        pix[0] = (pix[0]).mul_add(14.0, 0.42);
+        pix[1] += 0.01;
     }
 }
 
@@ -233,9 +244,22 @@ fn ssim_map(
                 let mu22 = mu2 * mu2;
                 let mu12 = mu1 * mu2;
                 let mu_diff = mu1 - mu2;
+
+                // Correction applied compared to the original SSIM formula, which has:
+                //   luma_err = 2 * mu1 * mu2 / (mu1^2 + mu2^2)
+                //            = 1 - (mu1 - mu2)^2 / (mu1^2 + mu2^2)
+                // The denominator causes error in the darks (low mu1 and mu2) to weigh
+                // more than error in the brights (high mu1 and mu2). This would make
+                // sense if values correspond to linear luma. However, the actual values
+                // are either gamma-compressed luma (which supposedly is already
+                // perceptually uniform) or chroma (where weighing green more than red
+                // or blue more than yellow does not make any sense at all). So it is
+                // better to simply drop this denominator.
                 let num_m = mu_diff.mul_add(-mu_diff, 1.0f32);
                 let num_s = 2f32.mul_add(row_s12[x] - mu12, C2);
                 let denom_s = (row_s11[x] - mu11) + (row_s22[x] - mu22) + C2;
+                // Use 1 - SSIM' so it becomes an error score instead of a quality
+                // index. This makes it make sense to compute an L_4 norm.
                 let mut d = 1.0f64 - f64::from((num_m * num_s) / denom_s);
                 d = d.max(0.0);
                 sum1[0] += d;
@@ -271,13 +295,15 @@ fn edge_diff_map(
                 let d1: f64 = (1.0 + f64::from((row2[x] - rowm2[x]).abs()))
                     / (1.0 + f64::from((row1[x] - rowm1[x]).abs()))
                     - 1.0;
+
                 // d1 > 0: distorted has an edge where original is smooth
                 //         (indicating ringing, color banding, blockiness, etc)
-                // d1 < 0: original has an edge where distorted is smooth
-                //         (indicating smoothing, blurring, smearing, etc)
                 let artifact = d1.max(0.0);
                 sum1[0] += artifact;
                 sum1[1] += artifact.powi(4);
+
+                // d1 < 0: original has an edge where distorted is smooth
+                //         (indicating smoothing, blurring, smearing, etc)
                 let detail_lost = (-d1).max(0.0);
                 sum1[2] += detail_lost;
                 sum1[3] += detail_lost.powi(4);
@@ -304,117 +330,147 @@ struct MsssimScale {
 }
 
 impl Msssim {
+    // The final score is based on a weighted sum of 108 sub-scores:
+    // - for 6 scales (1:1 to 1:32)
+    // - for 6 scales (1:1 to 1:32, downsampled in linear RGB)
+    // - for 3 components (X + 0.5, Y, B - Y + 1.0)
+    // - for 3 components (X, Y, B-Y, rescaled to 0..1 range)
+    // - using 2 norms (the 1-norm and the 4-norm)
+    // - using 2 norms (the 1-norm and the 4-norm)
+    // - over 3 error maps:
+    // - over 3 error maps:
+    //     - SSIM
+    //     - SSIM' (SSIM without the spurious gamma correction term)
+    //     - "ringing" (distorted edges where there are no orig edges)
+    //     - "ringing" (distorted edges where there are no orig edges)
+    //     - "blurring" (orig edges where there are no distorted edges)
+    //     - "blurring" (orig edges where there are no distorted edges)
+    // The weights were obtained by running Nelder-Mead simplex search,
+    // The weights were obtained by running Nelder-Mead simplex search,
+    // optimizing to minimize MSE and maximize Kendall and Pearson correlation
+    // optimizing to minimize MSE for the CID22 training set and to
+    // for training data consisting of 17611 subjective quality scores,
+    // maximize Kendall rank correlation (and with a lower weight,
+    // validated on separate validation data consisting of 4292 scores.
+    // also Pearson correlation) with the CID22 training set and the
+    // TID2013, Kadid10k and KonFiG-IQA datasets.
+    // Validation was done on the CID22 validation set.
+    // Final results after tuning (Kendall | Spearman | Pearson):
+    //    CID22:     0.6903 | 0.8805 | 0.8583
+    //    TID2013:   0.6590 | 0.8445 | 0.8471
+    //    KADID-10k: 0.6175 | 0.8133 | 0.8030
+    //    KonFiG(F): 0.7668 | 0.9194 | 0.9136
     #[allow(clippy::too_many_lines)]
     pub fn score(&self) -> f64 {
         const WEIGHT: [f64; 108] = [
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            1.003_547_935_251_235_3_f64,
-            0.000_113_220_611_104_747_35_f64,
-            0.000_404_429_918_236_859_36_f64,
-            0.001_895_383_410_578_377_3_f64,
-            0.0_f64,
-            0.0_f64,
-            8.982_542_997_575_905_f64,
-            0.989_978_579_604_555_6_f64,
-            0.0_f64,
-            0.974_831_513_120_794_2_f64,
-            0.958_157_516_993_797_3_f64,
-            0.0_f64,
-            0.513_361_177_795_294_6_f64,
-            1.042_318_931_733_124_3_f64,
-            0.000_308_010_928_520_841_f64,
-            12.149_584_966_240_063_f64,
-            0.956_557_724_811_546_7_f64,
-            0.0_f64,
-            1.040_666_812_313_682_4_f64,
-            81.511_390_460_573_62_f64,
-            0.305_933_918_953_309_46_f64,
-            1.075_221_443_362_677_9_f64,
-            1.103_904_236_946_461_1_f64,
-            0.0_f64,
-            1.021_911_638_819_618_f64,
-            1.114_182_329_685_572_2_f64,
-            0.973_084_575_144_170_5_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.983_391_842_609_550_5_f64,
-            0.792_038_513_705_986_7_f64,
-            0.971_074_041_151_405_3_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.538_707_790_315_263_8_f64,
-            0.0_f64,
-            3.403_694_560_115_580_4_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            2.337_569_295_661_117_f64,
-            0.0_f64,
-            5.707_946_510_901_609_f64,
-            37.830_864_238_781_57_f64,
-            0.0_f64,
-            0.0_f64,
-            3.825_820_059_430_518_5_f64,
-            0.0_f64,
-            0.0_f64,
-            24.073_659_674_271_497_f64,
-            0.0_f64,
-            0.0_f64,
-            13.181_871_265_286_068_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            10.007_501_212_628_95_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            52.514_283_856_038_91_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.0_f64,
-            0.994_646_426_789_441_7_f64,
-            0.0_f64,
-            0.0_f64,
-            0.000_604_044_771_593_481_6_f64,
-            0.0_f64,
-            0.0_f64,
-            0.994_517_149_137_407_2_f64,
-            0.0_f64,
-            2.826_004_380_945_437_6_f64,
-            1.005_264_276_653_451_6_f64,
-            8.201_441_997_546_244e-5_f64,
-            12.154_041_855_876_695_f64,
-            32.292_928_706_201_266_f64,
-            0.992_837_130_387_521_f64,
-            0.0_f64,
-            30.719_255_178_446_03_f64,
-            0.000_123_099_070_222_787_43_f64,
-            0.0_f64,
-            0.982_626_023_705_173_4_f64,
-            0.0_f64,
-            0.0_f64,
-            0.998_092_836_783_765_1_f64,
-            0.012_142_430_067_163_312_f64,
+            0.0,
+            0.000_737_660_670_740_658_6,
+            0.0,
+            0.0,
+            0.000_779_348_168_286_730_9,
+            0.0,
+            0.0,
+            0.000_437_115_573_010_737_9,
+            0.0,
+            1.104_172_642_665_734_6,
+            0.000_662_848_341_292_71,
+            0.000_152_316_327_837_187_52,
+            0.0,
+            0.001_640_643_745_659_975_4,
+            0.0,
+            1.842_245_552_053_929_8,
+            11.441_172_603_757_666,
+            0.0,
+            0.000_798_910_943_601_516_3,
+            0.000_176_816_438_078_653,
+            0.0,
+            1.878_759_497_954_638_7,
+            10.949_069_906_051_42,
+            0.0,
+            0.000_728_934_699_150_807_2,
+            0.967_793_708_062_683_3,
+            0.0,
+            0.000_140_034_242_854_358_84,
+            0.998_176_697_785_496_7,
+            0.000_319_497_559_344_350_53,
+            0.000_455_099_211_379_206_3,
+            0.0,
+            0.0,
+            0.001_364_876_616_324_339_8,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            7.466_890_328_078_848,
+            0.0,
+            17.445_833_984_131_262,
+            0.000_623_560_163_404_146_6,
+            0.0,
+            0.0,
+            6.683_678_146_179_332,
+            0.000_377_244_079_796_112_96,
+            1.027_889_937_768_264,
+            225.205_153_008_492_74,
+            0.0,
+            0.0,
+            19.213_238_186_143_016,
+            0.001_140_152_458_661_836_1,
+            0.001_237_755_635_509_985,
+            176.393_175_984_506_94,
+            0.0,
+            0.0,
+            24.433_009_998_704_76,
+            0.285_208_026_121_177_57,
+            0.000_448_543_692_383_340_8,
+            0.0,
+            0.0,
+            0.0,
+            34.779_063_444_837_72,
+            44.835_625_328_877_896,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.000_868_055_657_329_169_8,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.000_531_319_187_435_874_7,
+            0.0,
+            0.000_165_338_141_613_791_12,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.000_417_917_180_325_133_6,
+            0.001_729_082_823_472_283_3,
+            0.0,
+            0.002_082_700_584_663_643_7,
+            0.0,
+            0.0,
+            8.826_982_764_996_862,
+            23.192_433_439_989_26,
+            0.0,
+            95.108_049_881_108_6,
+            0.986_397_803_440_068_2,
+            0.983_438_279_246_535_3,
+            0.001_228_640_504_827_849_3,
+            171.266_725_589_730_7,
+            0.980_785_887_243_537_9,
+            0.0,
+            0.0,
+            0.0,
+            0.000_513_006_458_899_067_9,
+            0.0,
+            0.000_108_540_578_584_115_37,
         ];
 
         let mut ssim = 0.0f64;
@@ -433,11 +489,15 @@ impl Msssim {
             }
         }
 
-        ssim = ssim.mul_add(17.829_717_797_575_952_f64, -1.634_169_143_917_183_f64);
+        ssim *= 0.956_238_261_683_484_4_f64;
+        ssim = (6.248_496_625_763_138e-5 * ssim * ssim).mul_add(
+            ssim,
+            2.326_765_642_916_932f64.mul_add(ssim, -0.020_884_521_182_843_837 * ssim * ssim),
+        );
 
         if ssim > 0.0f64 {
             ssim = ssim
-                .powf(0.545_326_100_951_021_3_f64)
+                .powf(0.627_633_646_783_138_7)
                 .mul_add(-10.0f64, 100.0f64);
         } else {
             ssim = 100.0f64;
@@ -457,13 +517,13 @@ mod tests {
     #[test]
     fn test_ssimulacra2() {
         let source = image::open(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("test_data")
                 .join("tank_source.png"),
         )
         .unwrap();
         let distorted = image::open(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("test_data")
                 .join("tank_distorted.png"),
         )
@@ -501,14 +561,12 @@ mod tests {
         )
         .unwrap();
         let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
-        let expected = 8.764_571_f64;
+        let expected = 17.398_505_f64;
         assert!(
             // SOMETHING is WEIRD with Github CI where it gives different results across DIFFERENT
             // RUNS
             (result - expected).abs() < 0.25f64,
-            "Result {:.6} not equal to expected {:.6}",
-            result,
-            expected
+            "Result {result:.6} not equal to expected {expected:.6}",
         );
     }
 }
