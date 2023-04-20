@@ -4,4 +4,4 @@
 [![Crates.io](https://img.shields.io/crates/v/ssimulacra2?style=for-the-badge)](https://crates.io/crates/ssimulacra2)
 [![LICENSE](https://img.shields.io/crates/l/ssimulacra2?style=for-the-badge)](https://github.com/rust-av/ssimulacra2/blob/main/LICENSE)
 
-Rust implementation of the SSIMULACRA2 metric.
+Rust implementation of the [SSIMULACRA2 metric](https://github.com/cloudinary/ssimulacra2).
