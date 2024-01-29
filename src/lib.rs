@@ -41,12 +41,32 @@
 
 mod blur;
 
-use anyhow::{bail, Result};
 pub use blur::Blur;
 pub use yuvxyb::{CastFromPrimitive, Frame, LinearRgb, Pixel, Plane, Rgb, Xyb, Yuv};
 pub use yuvxyb::{ColorPrimaries, MatrixCoefficients, TransferCharacteristic, YuvConfig};
 
+// How often to downscale and score the input images.
+// Each scaling step will downscale by a factor of two.
 const NUM_SCALES: usize = 6;
+
+/// Errors which can occur when attempting to calculate a SSIMULACRA2 score from two input images.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Ssimulacra2Error {
+    /// The conversion from input image to [LinearRgb] (via [TryFrom]) returned an [Err].
+    /// Note that the conversion from LinearRgb to [Xyb] cannot fail, which means that
+    /// this is the only point of failure regarding image conversion.
+    #[error("Failed to convert input image to linear RGB")]
+    LinearRgbConversionFailed,
+
+    /// The two input images do not have the same width and height.
+    #[error("Source and distorted image width and height must be equal")]
+    NonMatchingImageDimensions,
+
+    /// One of the input images has a width and/or height of less than 8 pixels.
+    /// This is not currently supported by the SSIMULACRA2 metric.
+    #[error("Images must be at least 8x8 pixels")]
+    InvalidImageSize,
+}
 
 /// Computes the SSIMULACRA2 score for a given input frame and the distorted
 /// version of that frame.
@@ -55,23 +75,24 @@ const NUM_SCALES: usize = 6;
 /// - If the source and distorted image width and height do not match
 /// - If the source or distorted image cannot be converted to XYB successfully
 /// - If the image is smaller than 8x8 pixels
-pub fn compute_frame_ssimulacra2<T: TryInto<LinearRgb>, U: TryInto<LinearRgb>>(
-    source: T,
-    distorted: U,
-) -> Result<f64> {
-    let mut img1: LinearRgb = source
-        .try_into()
-        .map_err(|_e| anyhow::anyhow!("Failed to convert to Linear Rgb"))?;
-    let mut img2: LinearRgb = distorted
-        .try_into()
-        .map_err(|_e| anyhow::anyhow!("Failed to convert to Linear Rgb"))?;
+pub fn compute_frame_ssimulacra2<T, U>(source: T, distorted: U) -> Result<f64, Ssimulacra2Error>
+where
+    LinearRgb: TryFrom<T> + TryFrom<U>,
+{
+    let Ok(mut img1) = LinearRgb::try_from(source) else {
+        return Err(Ssimulacra2Error::LinearRgbConversionFailed);
+    };
+
+    let Ok(mut img2) = LinearRgb::try_from(distorted) else {
+        return Err(Ssimulacra2Error::LinearRgbConversionFailed);
+    };
 
     if img1.width() != img2.width() || img1.height() != img2.height() {
-        bail!("Source and distorted image width and height must be equal");
+        return Err(Ssimulacra2Error::NonMatchingImageDimensions);
     }
 
     if img1.width() < 8 || img1.height() < 8 {
-        bail!("Images must be at least 8x8 pixels");
+        return Err(Ssimulacra2Error::InvalidImageSize);
     }
 
     let mut width = img1.width();
