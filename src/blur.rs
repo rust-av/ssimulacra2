@@ -6,12 +6,11 @@ use nalgebra::base::{Matrix3, Matrix3x1};
 /// Structure handling image blur.
 ///
 /// This struct contains the necessary buffers and the kernel used for blurring
-/// (currently a recursive Gaussian algorithm).
+/// (currently a recursive approximation of the Gaussian filter).
 /// 
-/// Note that the width and height of the image passed to [blur][Self::blur]
-/// needs to exactly match the width and height of this instance. If you reduce
-/// the image size (e.g. via downscaling), [shrink_to][Self::shrink_to] can be
-/// used to resize the internal buffers.
+/// Note that the width and height of the image passed to [blur][Self::blur] needs to exactly
+/// match the width and height of this instance. If you reduce the image size (e.g. via
+/// downscaling), [`shrink_to`][Self::shrink_to] can be used to resize the internal buffers.
 pub struct Blur {
     kernel: RecursiveGaussian,
     temp: Vec<f32>,
@@ -32,11 +31,10 @@ impl Blur {
         }
     }
 
-    /// Truncates the internal buffers to fit images of the given width and
-    /// height.
+    /// Truncates the internal buffers to fit images of the given width and height.
     /// 
-    /// This will [truncate][Vec::truncate] the internal buffers without
-    /// affecting the allocated memory.
+    /// This will [truncate][Vec::truncate] the internal buffers
+    /// without affecting the allocated memory.
     pub fn shrink_to(&mut self, width: usize, height: usize) {
         self.temp.truncate(width * height);
         self.width = width;
