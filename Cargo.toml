@@ -2,7 +2,7 @@
 name = "ssimulacra2"
 version = "0.4.0"
 edition = "2021"
-rust-version = "1.61.0"
+rust-version = "1.65.0"
 description = "Rust implementation of the SSIMULACRA2 metric"
 repository = "https://github.com/rust-av/ssimulacra2"
 homepage = "https://github.com/rust-av/ssimulacra2"
@@ -15,10 +15,10 @@ default = ["rayon"]
 
 [dependencies]
 aligned = "0.4.1"
-anyhow = "1.0.0"
 nalgebra = "0.32.2"
 num-traits = "0.2.15"
 rayon = { version = "1.5.3", optional = true }
+thiserror = "1.0.56"
 wide = "0.7.5"
 yuvxyb = "0.3.0"
 
