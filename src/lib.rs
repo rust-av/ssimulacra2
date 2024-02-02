@@ -13,6 +13,7 @@
 #![allow(clippy::similar_names)]
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::use_self)]
+#![allow(clippy::unused_self)]
 #![warn(clippy::clone_on_ref_ptr)]
 #![warn(clippy::create_dir)]
 #![warn(clippy::dbg_macro)]
