@@ -14,11 +14,11 @@ fn main() {
 }
 
 fn write_const_f32<W: Write>(w: &mut W, name: &str, val: f32) -> io::Result<()> {
-    writeln!(w, "const {name}: f32 = {val}_f32;")
+    writeln!(w, "pub const {name}: f32 = {val}_f32;")
 }
 
 fn write_const_usize<W: Write>(w: &mut W, name: &str, val: usize) -> io::Result<()> {
-    writeln!(w, "const {name}: usize = {val}_usize;")
+    writeln!(w, "pub const {name}: usize = {val}_usize;")
 }
 
 fn init_recursive_gaussian(out_path: &str) -> io::Result<()> {

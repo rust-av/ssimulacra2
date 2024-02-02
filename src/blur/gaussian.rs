@@ -1,4 +1,7 @@
-include!(concat!(env!("OUT_DIR"), "/recursive_gaussian.rs"));
+mod consts {
+    #![allow(clippy::unreadable_literal)]
+    include!(concat!(env!("OUT_DIR"), "/recursive_gaussian.rs"));
+}
 
 /// Implements "Recursive Implementation of the Gaussian Filter Using Truncated
 /// Cosine Functions" by Charalampidis [2016].
@@ -32,7 +35,7 @@ impl RecursiveGaussian {
     }
 
     fn horizontal_row(&self, input: &[f32], output: &mut [f32], width: usize) {
-        let big_n = RADIUS as isize;
+        let big_n = consts::RADIUS as isize;
         let mut prev_1 = 0f32;
         let mut prev_3 = 0f32;
         let mut prev_5 = 0f32;
@@ -58,20 +61,20 @@ impl RecursiveGaussian {
             };
             let sum = left_val + right_val;
 
-            let mut out_1 = sum * MUL_IN_1;
-            let mut out_3 = sum * MUL_IN_3;
-            let mut out_5 = sum * MUL_IN_5;
+            let mut out_1 = sum * consts::MUL_IN_1;
+            let mut out_3 = sum * consts::MUL_IN_3;
+            let mut out_5 = sum * consts::MUL_IN_5;
 
-            out_1 = MUL_PREV2_1.mul_add(prev2_1, out_1);
-            out_3 = MUL_PREV2_3.mul_add(prev2_3, out_3);
-            out_5 = MUL_PREV2_5.mul_add(prev2_5, out_5);
+            out_1 = consts::MUL_PREV2_1.mul_add(prev2_1, out_1);
+            out_3 = consts::MUL_PREV2_3.mul_add(prev2_3, out_3);
+            out_5 = consts::MUL_PREV2_5.mul_add(prev2_5, out_5);
             prev2_1 = prev_1;
             prev2_3 = prev_3;
             prev2_5 = prev_5;
 
-            out_1 = MUL_PREV_1.mul_add(prev_1, out_1);
-            out_3 = MUL_PREV_3.mul_add(prev_3, out_3);
-            out_5 = MUL_PREV_5.mul_add(prev_5, out_5);
+            out_1 = consts::MUL_PREV_1.mul_add(prev_1, out_1);
+            out_3 = consts::MUL_PREV_3.mul_add(prev_3, out_3);
+            out_5 = consts::MUL_PREV_5.mul_add(prev_5, out_5);
             prev_1 = out_1;
             prev_3 = out_3;
             prev_5 = out_5;
@@ -127,7 +130,7 @@ impl RecursiveGaussian {
     ) {
         assert_eq!(input.len(), output.len());
 
-        let big_n = RADIUS as isize;
+        let big_n = consts::RADIUS as isize;
 
         let zeroes = vec![0f32; COLUMNS];
         let mut prev = vec![0f32; 3 * COLUMNS];
@@ -157,13 +160,13 @@ impl RecursiveGaussian {
                 let i3 = i1 + COLUMNS;
                 let i5 = i3 + COLUMNS;
 
-                let out1 = prev[i1].mul_add(VERT_MUL_PREV_1, prev2[i1]);
-                let out3 = prev[i3].mul_add(VERT_MUL_PREV_3, prev2[i3]);
-                let out5 = prev[i5].mul_add(VERT_MUL_PREV_5, prev2[i5]);
+                let out1 = prev[i1].mul_add(consts::VERT_MUL_PREV_1, prev2[i1]);
+                let out3 = prev[i3].mul_add(consts::VERT_MUL_PREV_3, prev2[i3]);
+                let out5 = prev[i5].mul_add(consts::VERT_MUL_PREV_5, prev2[i5]);
 
-                let out1 = sum.mul_add(VERT_MUL_IN_1, -out1);
-                let out3 = sum.mul_add(VERT_MUL_IN_3, -out3);
-                let out5 = sum.mul_add(VERT_MUL_IN_5, -out5);
+                let out1 = sum.mul_add(consts::VERT_MUL_IN_1, -out1);
+                let out3 = sum.mul_add(consts::VERT_MUL_IN_3, -out3);
+                let out5 = sum.mul_add(consts::VERT_MUL_IN_5, -out5);
 
                 out[i1] = out1;
                 out[i3] = out3;
