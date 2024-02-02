@@ -14,13 +14,13 @@ license = "BSD-2-Clause"
 default = ["rayon"]
 
 [dependencies]
-aligned = "0.4.1"
-nalgebra = "0.32.2"
 num-traits = "0.2.15"
 rayon = { version = "1.5.3", optional = true }
 thiserror = "1.0.56"
-wide = "0.7.5"
 yuvxyb = "0.3.0"
+
+[build-dependencies]
+nalgebra = "0.32.2"
 
 [dev-dependencies]
 criterion = "0.4.0"

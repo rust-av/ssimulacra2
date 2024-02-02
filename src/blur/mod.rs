@@ -6,7 +6,7 @@ use gaussian::RecursiveGaussian;
 ///
 /// This struct contains the necessary buffers and the kernel used for blurring
 /// (currently a recursive approximation of the Gaussian filter).
-/// 
+///
 /// Note that the width and height of the image passed to [blur][Self::blur] needs to exactly
 /// match the width and height of this instance. If you reduce the image size (e.g. via
 /// downscaling), [`shrink_to`][Self::shrink_to] can be used to resize the internal buffers.
@@ -23,7 +23,7 @@ impl Blur {
     #[must_use]
     pub fn new(width: usize, height: usize) -> Self {
         Blur {
-            kernel: RecursiveGaussian::new(),
+            kernel: RecursiveGaussian,
             temp: vec![0.0f32; width * height],
             width,
             height,
@@ -31,7 +31,7 @@ impl Blur {
     }
 
     /// Truncates the internal buffers to fit images of the given width and height.
-    /// 
+    ///
     /// This will [truncate][Vec::truncate] the internal buffers
     /// without affecting the allocated memory.
     pub fn shrink_to(&mut self, width: usize, height: usize) {
