@@ -24,7 +24,6 @@
 #![warn(clippy::lossy_float_literal)]
 #![warn(clippy::map_err_ignore)]
 #![warn(clippy::mem_forget)]
-#![warn(clippy::mod_module_files)]
 #![warn(clippy::multiple_inherent_impl)]
 #![warn(clippy::pattern_type_mismatch)]
 #![warn(clippy::rc_buffer)]
