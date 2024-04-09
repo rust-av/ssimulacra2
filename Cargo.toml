@@ -2,13 +2,15 @@
 name = "ssimulacra2"
 version = "0.4.0"
 edition = "2021"
-rust-version = "1.65.0"
 description = "Rust implementation of the SSIMULACRA2 metric"
 repository = "https://github.com/rust-av/ssimulacra2"
 homepage = "https://github.com/rust-av/ssimulacra2"
 documentation = "https://docs.rs/ssimulacra2"
 exclude = ["test_data"]
 license = "BSD-2-Clause"
+
+# When changing MSRV: Also update README and .github/workflows/rust.yml
+rust-version = "1.65.0"
 
 [features]
 default = ["rayon"]

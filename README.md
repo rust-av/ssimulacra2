@@ -5,3 +5,8 @@
 [![LICENSE](https://img.shields.io/crates/l/ssimulacra2?style=for-the-badge)](https://github.com/rust-av/ssimulacra2/blob/main/LICENSE)
 
 Rust implementation of the [SSIMULACRA2 metric](https://github.com/cloudinary/ssimulacra2).
+
+## Minimum supported Rust version (MSRV)
+
+This crates requires a Rust version of 1.62.0 or higher. Increases in MSRV will result in a semver PATCH version increase.
+
