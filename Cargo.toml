@@ -1,6 +1,6 @@
 [package]
 name = "ssimulacra2"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Rust implementation of the SSIMULACRA2 metric"
 repository = "https://github.com/rust-av/ssimulacra2"
