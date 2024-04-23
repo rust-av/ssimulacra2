@@ -21,11 +21,13 @@ rayon = { version = "1.5.3", optional = true }
 thiserror = "1.0.56"
 yuvxyb = "0.4.0"
 
-[build-dependencies]
-nalgebra = "0.32.2"
+[build-dependencies.nalgebra]
+version = "0.32.2"
+default-features = false
+features = ["std"]
 
 [dev-dependencies]
-criterion = "0.4.0"
+criterion = "0.5.0"
 image = "0.24.4"
 rand = "0.8.5"
 
