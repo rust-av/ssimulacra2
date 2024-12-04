@@ -5,7 +5,7 @@ use std::io;
 use std::io::Write;
 use std::path::Path;
 
-use nalgebra::{Matrix3, Matrix3x1};
+use yuvxyb_math::{ColVector, Matrix, RowVector};
 
 fn main() {
     let out_dir = &env::var("OUT_DIR").expect("can read OUT_DIR");
@@ -60,17 +60,21 @@ fn init_recursive_gaussian(out_path: &str) -> io::Result<()> {
     let zeta_35 = d_51 * recip_d13;
 
     // (56)
-    let a = Matrix3::from_row_slice(&[p_1, p_3, p_5, r_1, r_3, r_5, zeta_15, zeta_35, 1.0f64])
-        .try_inverse()
-        .expect("Has inverse");
+    let a = Matrix::new(
+        RowVector::new(p_1, p_3, p_5),
+        RowVector::new(r_1, r_3, r_5),
+        RowVector::new(zeta_15, zeta_35, 1.0),
+    )
+    .invert();
+
     // (55)
-    let gamma = Matrix3x1::from_column_slice(&[
-        1.0f64,
+    let gamma = ColVector::new(
+        1.0,
         radius.mul_add(radius, -SIGMA * SIGMA),
         zeta_15.mul_add(rho[0], zeta_35 * rho[1]) + rho[2],
-    ]);
+    );
     // (53)
-    let beta = a * gamma;
+    let beta = a.mul_vec(&gamma).values();
 
     // Sanity check: correctly solved for beta (IIR filter weights are normalized)
     // (39)
