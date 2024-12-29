@@ -1,3 +1,10 @@
+## Version 0.5.1
+
+- Remove nalgebra-macros and update criterion
+- Use yuvxyb-math to calculate float constants
+- Cleanup way too verbose Clippy settings
+- Update thiserror to 2.0
+
 ## Version 0.5.0
 
 - Return a concrete `Ssimulacra2Error` error type instead of a freeform `anyhow::Result`
