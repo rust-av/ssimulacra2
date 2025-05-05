@@ -646,7 +646,7 @@ impl Msssim {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, time::Instant};
 
     use super::*;
     use yuvxyb::Rgb;
@@ -697,7 +697,10 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        let start = Instant::now();
         let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
+        let elapsed = start.elapsed();
+        println!("Elapsed time: {:?}", elapsed);
         let expected = 17.398_505_f64;
         println!("Result: {result:.6}");
         println!("Expected: {expected:.6}");
@@ -761,7 +764,10 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        let start = Instant::now();
         let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
+        let elapsed = start.elapsed();
+        println!("Elapsed time: {:?}", elapsed);
         let expected = 84.031_931_f64;
 
         println!("Result: {result:.6}");
