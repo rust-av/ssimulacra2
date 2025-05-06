@@ -10,7 +10,7 @@ exclude = ["test_data"]
 license = "BSD-2-Clause"
 
 # When changing MSRV: Also update README and .github/workflows/rust.yml
-rust-version = "1.65.0"
+rust-version = "1.82.0"
 
 [features]
 default = ["rayon"]
