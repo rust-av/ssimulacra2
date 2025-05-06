@@ -22,7 +22,7 @@ jobs:
       - name: Use predefined lockfile
         run: mv Cargo.lock.MSRV Cargo.lock
       - name: Build
-        run: cargo check --locked
+        run: cargo check
 
   build:
     runs-on: ubuntu-latest

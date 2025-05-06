@@ -109,7 +109,7 @@ where
             img1 = downscale_by_2(&img1);
             img2 = downscale_by_2(&img2);
             width = img1.width();
-            height = img1.height(); // fix? : img2.height() -> img1.height()
+            height = img2.height();
 
             for c in &mut mul {
                 c.truncate(width * height);
