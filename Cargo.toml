@@ -16,7 +16,7 @@ rust-version = "1.82.0"
 default = ["rayon"]
 
 [dependencies]
-libblur = "0.17"
+libblur = { version = "0.17", optional = true }
 num-traits = "0.2.19"
 rayon = { version = "1.10", optional = true }
 thiserror = "2.0.12"

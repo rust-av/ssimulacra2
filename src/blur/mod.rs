@@ -1,4 +1,9 @@
+#[cfg(not(feature = "libblur"))]
+mod gaussian;
+
+#[cfg(all(feature = "rayon", feature = "libblur"))]
 use libblur::{BlurImage, BlurImageMut, EdgeMode, FastBlurChannels, ThreadingPolicy};
+#[cfg(all(feature = "rayon", feature = "libblur"))]
 use std::borrow::Cow;
 
 use crate::Ssimulacra2Error;
@@ -41,6 +46,21 @@ impl Blur {
         Ok(())
     }
 
+    #[cfg(not(feature = "libblur"))]
+    fn blur_plane(&mut self, plane: &[f32], out: &mut [f32]) -> Result<(), Ssimulacra2Error> {
+        let kernel = gaussian::RecursiveGaussian;
+        let mut temp = gaussian::get_buffer(self.width * self.height);
+
+        kernel.horizontal_pass(plane, &mut temp, self.width);
+        kernel.vertical_pass(&temp, out, self.width, self.height);
+
+        // 임시 버퍼 반환
+        gaussian::return_buffer(temp);
+
+        Ok(())
+    }
+
+    #[cfg(all(feature = "rayon", feature = "libblur"))]
     fn blur_plane(&mut self, plane: &[f32], out: &mut [f32]) -> Result<(), Ssimulacra2Error> {
         //Set kernel size and sigma value - adjust as needed but not recommended to change
         const KERNEL_SIZE: u32 = 11;
