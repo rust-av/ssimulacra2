@@ -1,115 +1,32 @@
 #[cfg(not(feature = "libblur"))]
-mod gaussian;
-
+mod gaussian_impl;
 #[cfg(all(feature = "rayon", feature = "libblur"))]
-use libblur::{BlurImage, BlurImageMut, EdgeMode, FastBlurChannels, ThreadingPolicy};
-#[cfg(all(feature = "rayon", feature = "libblur"))]
-use std::borrow::Cow;
-
+mod libblur_impl;
 use crate::Ssimulacra2Error;
 
-/// Structure handling image blur.
+/// Trait handling image blur.
 ///
-/// This struct contains the necessary buffers and the kernel used for blurring
+/// This trait contains the necessary buffers and the kernel used for blurring
 /// (currently a recursive approximation of the Gaussian filter).
 ///
 /// Note that the width and height of the image passed to [blur][Self::blur] needs to exactly
 /// match the width and height of this instance. If you reduce the image size (e.g. via
 /// downscaling), [`shrink_to`][Self::shrink_to] can be used to resize the internal buffers.
-pub struct Blur {
-    width: usize,
-    height: usize,
-}
-
-impl Blur {
+pub trait BlurOperator {
     /// Create a new [Blur] for images of the given width and height.
-    #[must_use]
-    pub fn new(width: usize, height: usize) -> Self {
-        Blur { width, height }
-    }
-
+    fn new(width: usize, height: usize) -> Self;
     /// Truncates the internal buffers to fit images of the given width and height.
-    pub fn shrink_to(&mut self, width: usize, height: usize) {
-        self.width = width;
-        self.height = height;
-    }
-
+    fn shrink_to(&mut self, width: usize, height: usize);
     /// Blur the given image using libblur's gaussian_blur_f32.
-    pub fn blur(
+    fn blur(
         &mut self,
         img: &[Vec<f32>; 3],
         out: &mut [Vec<f32>; 3],
-    ) -> Result<(), Ssimulacra2Error> {
-        self.blur_plane(&img[0], &mut out[0])?;
-        self.blur_plane(&img[1], &mut out[1])?;
-        self.blur_plane(&img[2], &mut out[2])?;
-        Ok(())
-    }
-
-    #[cfg(not(feature = "libblur"))]
-    fn blur_plane(&mut self, plane: &[f32], out: &mut [f32]) -> Result<(), Ssimulacra2Error> {
-        let kernel = gaussian::RecursiveGaussian;
-        let mut temp = gaussian::get_buffer(self.width * self.height);
-
-        kernel.horizontal_pass(plane, &mut temp, self.width);
-        kernel.vertical_pass(&temp, out, self.width, self.height);
-
-        // 임시 버퍼 반환
-        gaussian::return_buffer(temp);
-
-        Ok(())
-    }
-
-    #[cfg(all(feature = "rayon", feature = "libblur"))]
-    fn blur_plane(&mut self, plane: &[f32], out: &mut [f32]) -> Result<(), Ssimulacra2Error> {
-        //Set kernel size and sigma value - adjust as needed but not recommended to change
-        const KERNEL_SIZE: u32 = 11;
-        const SIGMA: f32 = 2.3;
-
-        // BlurImage creation
-        let src_image = BlurImage {
-            data: Cow::Borrowed(plane),
-            width: self.width as u32,
-            height: self.height as u32,
-            stride: self.width as u32, // stride == width
-            channels: FastBlurChannels::Plane,
-        };
-
-        // BlurImageMut creation
-        let mut dst_image = BlurImageMut::borrow(
-            out,
-            self.width as u32,
-            self.height as u32,
-            FastBlurChannels::Plane,
-        );
-
-        // gaussian_blur_f32 call
-        #[cfg(feature = "rayon")]
-        if let Err(e) = libblur::gaussian_blur_f32(
-            &src_image,
-            &mut dst_image,
-            KERNEL_SIZE,
-            SIGMA,
-            EdgeMode::Clamp,
-            ThreadingPolicy::Adaptive, // use rayon
-        ) {
-            eprintln!("Error in gaussian_blur_f32: {:?}", e);
-            return Err(Ssimulacra2Error::GaussianBlurError);
-        }
-
-        #[cfg(not(feature = "rayon"))]
-        if let Err(e) = libblur::gaussian_blur_f32(
-            &src_image,
-            &mut dst_image,
-            kernel_size,
-            sigma,
-            EdgeMode::Clamp,
-            ThreadingPolicy::Single, // no rayon
-        ) {
-            eprintln!("Error in gaussian_blur_f32: {:?}", e);
-            return Err(Ssimulacra2Error::GaussianBlurError);
-        }
-
-        Ok(())
-    }
+    ) -> Result<(), Ssimulacra2Error>;
 }
+
+#[cfg(not(feature = "libblur"))]
+pub use gaussian_impl::GaussianBlur as Blur;
+
+#[cfg(all(feature = "rayon", feature = "libblur"))]
+pub use libblur_impl::LibBlur as Blur;

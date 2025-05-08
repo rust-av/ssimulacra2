@@ -2,8 +2,8 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use num_traits::clamp;
 use rand::Rng;
 use ssimulacra2::{
-    compute_frame_ssimulacra2, xyb_to_planar, Blur, ColorPrimaries, Frame, MatrixCoefficients,
-    Plane, TransferCharacteristic, Yuv, YuvConfig,
+    compute_frame_ssimulacra2, xyb_to_planar, Blur, BlurOperator, ColorPrimaries, Frame,
+    MatrixCoefficients, Plane, TransferCharacteristic, Yuv, YuvConfig,
 };
 use yuvxyb::{LinearRgb, Xyb};
 
@@ -147,16 +147,16 @@ fn create_linearrgb_from_image(path: &str) -> LinearRgb {
 
 // downscale_by_2
 fn bench_downscale_by_2(c: &mut Criterion) {
-    let mut group = c.benchmark_group("downscale");
-    group.measurement_time(std::time::Duration::from_secs_f32(9.2)); //Unable to complete 100 samples in 9.0s, so increased to 9.2s
+    // let mut group = c.benchmark_group("downscale");
+    // group.measurement_time(std::time::Duration::from_secs_f32(9.2)); //Unable to complete 100 samples in 9.0s, so increased to 9.2s
 
-    group.bench_function("downscale_by_2", |b| {
+    c.bench_function("downscale_by_2", |b| {
         // load the image
         let image = create_linearrgb_from_image("test_data/tank_source.png");
 
         b.iter(|| ssimulacra2::downscale_by_2(black_box(&image)))
     });
-    group.finish();
+    // c.finish();
 }
 
 fn bench_image_multiply(c: &mut Criterion) {
