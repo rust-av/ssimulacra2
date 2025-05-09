@@ -20,7 +20,7 @@ libblur = { version = "0.17", optional = true }
 num-traits = "0.2.19"
 rayon = { version = "1.10", optional = true }
 thiserror = "2.0.12"
-yuvxyb = "0.4.1"
+yuvxyb = "0.4.2"
 
 [build-dependencies.yuvxyb-math]
 version = "0.1"

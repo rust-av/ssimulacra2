@@ -701,8 +701,8 @@ mod tests {
         let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
         let elapsed = start.elapsed();
         println!("Elapsed time: {:?}", elapsed);
-        // let expected = 17.398_505_f64;
-        let expected = 17.392219_f64;
+        let expected = 17.398_505_f64;
+
         println!("Result: {result:.6}");
         println!("Expected: {expected:.6}");
         println!("Diff: {:.3}", (result - expected).abs());
