@@ -1,6 +1,6 @@
 [package]
 name = "ssimulacra2"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 description = "Rust implementation of the SSIMULACRA2 metric"
 repository = "https://github.com/rust-av/ssimulacra2"
@@ -10,16 +10,17 @@ exclude = ["test_data"]
 license = "BSD-2-Clause"
 
 # When changing MSRV: Also update README and .github/workflows/rust.yml
-rust-version = "1.65.0"
+rust-version = "1.82.0"
 
 [features]
 default = ["rayon"]
 
 [dependencies]
-num-traits = "0.2.15"
-rayon = { version = "1.5.3", optional = true }
-thiserror = "2.0.9"
-yuvxyb = "0.4.1"
+libblur = { version = "0.17", optional = true }
+num-traits = "0.2.19"
+rayon = { version = "1.10", optional = true }
+thiserror = "2.0.12"
+yuvxyb = "0.4.2"
 
 [build-dependencies.yuvxyb-math]
 version = "0.1"
@@ -27,7 +28,7 @@ version = "0.1"
 [dev-dependencies]
 criterion = "0.5.0"
 image = "0.25.0"
-rand = "0.8.5"
+rand = "0.9.1"
 
 [[bench]]
 name = "benches"

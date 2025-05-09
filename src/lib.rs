@@ -1,6 +1,6 @@
 mod blur;
 
-pub use blur::Blur;
+pub use blur::{Blur, BlurOperator};
 pub use yuvxyb::{CastFromPrimitive, Frame, LinearRgb, Pixel, Plane, Rgb, Xyb, Yuv};
 pub use yuvxyb::{ColorPrimaries, MatrixCoefficients, TransferCharacteristic, YuvConfig};
 
@@ -25,6 +25,12 @@ pub enum Ssimulacra2Error {
     /// This is not currently supported by the SSIMULACRA2 metric.
     #[error("Images must be at least 8x8 pixels")]
     InvalidImageSize,
+
+    #[error("Error in gaussian_blur_f32")]
+    GaussianBlurError,
+
+    #[error("Error in fast_image_resize")]
+    ResizeError,
 }
 
 /// Computes the SSIMULACRA2 score for a given input frame and the distorted
@@ -34,6 +40,7 @@ pub enum Ssimulacra2Error {
 /// - If the source and distorted image width and height do not match
 /// - If the source or distorted image cannot be converted to XYB successfully
 /// - If the image is smaller than 8x8 pixels
+#[inline(always)]
 pub fn compute_frame_ssimulacra2<T, U>(source: T, distorted: U) -> Result<f64, Ssimulacra2Error>
 where
     LinearRgb: TryFrom<T> + TryFrom<U>,
@@ -57,11 +64,39 @@ where
     let mut width = img1.width();
     let mut height = img1.height();
 
+    let initial_size = width * height;
     let mut mul = [
-        vec![0.0f32; width * height],
-        vec![0.0f32; width * height],
-        vec![0.0f32; width * height],
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
     ];
+
+    let mut sigma1_sq = [
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
+    ];
+    let mut sigma2_sq = [
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
+    ];
+    let mut sigma12 = [
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
+    ];
+    let mut mu1 = [
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
+    ];
+    let mut mu2 = [
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
+        vec![0.0f32; initial_size],
+    ];
+
     let mut blur = Blur::new(width, height);
     let mut msssim = Msssim::default();
 
@@ -75,37 +110,55 @@ where
             img2 = downscale_by_2(&img2);
             width = img1.width();
             height = img2.height();
+
+            for c in &mut mul {
+                c.truncate(width * height);
+            }
+            for c in &mut sigma1_sq {
+                c.truncate(width * height);
+            }
+            for c in &mut sigma2_sq {
+                c.truncate(width * height);
+            }
+            for c in &mut sigma12 {
+                c.truncate(width * height);
+            }
+            for c in &mut mu1 {
+                c.truncate(width * height);
+            }
+            for c in &mut mu2 {
+                c.truncate(width * height);
+            }
+
+            blur.shrink_to(width, height);
         }
-        for c in &mut mul {
-            c.truncate(width * height);
-        }
-        blur.shrink_to(width, height);
 
-        let mut img1 = Xyb::from(img1.clone());
-        let mut img2 = Xyb::from(img2.clone());
+        // "Convert to XYB format"
+        let mut img1_xyb = Xyb::from(img1.clone());
+        let mut img2_xyb = Xyb::from(img2.clone());
 
-        make_positive_xyb(&mut img1);
-        make_positive_xyb(&mut img2);
+        make_positive_xyb(&mut img1_xyb);
+        make_positive_xyb(&mut img2_xyb);
 
-        // SSIMULACRA2 works with the data in a planar format,
-        // so we need to convert to that.
-        let img1 = xyb_to_planar(&img1);
-        let img2 = xyb_to_planar(&img2);
+        // "Convert to planar format"
+        let img1_planar = xyb_to_planar(&img1_xyb);
+        let img2_planar = xyb_to_planar(&img2_xyb);
 
-        image_multiply(&img1, &img1, &mut mul);
-        let sigma1_sq = blur.blur(&mul);
+        image_multiply(&img1_planar, &img1_planar, &mut mul);
+        blur.blur(&mul, &mut sigma1_sq)?;
 
-        image_multiply(&img2, &img2, &mut mul);
-        let sigma2_sq = blur.blur(&mul);
+        image_multiply(&img2_planar, &img2_planar, &mut mul);
+        blur.blur(&mul, &mut sigma2_sq)?;
 
-        image_multiply(&img1, &img2, &mut mul);
-        let sigma12 = blur.blur(&mul);
+        image_multiply(&img1_planar, &img2_planar, &mut mul);
+        blur.blur(&mul, &mut sigma12)?;
 
-        let mu1 = blur.blur(&img1);
-        let mu2 = blur.blur(&img2);
+        blur.blur(&img1_planar, &mut mu1)?;
+        blur.blur(&img2_planar, &mut mu2)?;
 
         let avg_ssim = ssim_map(width, height, &mu1, &mu2, &sigma1_sq, &sigma2_sq, &sigma12);
-        let avg_edgediff = edge_diff_map(width, height, &img1, &mu1, &img2, &mu2);
+        let avg_edgediff = edge_diff_map(width, height, &img1_planar, &mu1, &img2_planar, &mu2);
+
         msssim.scales.push(MsssimScale {
             avg_ssim,
             avg_edgediff,
@@ -126,6 +179,7 @@ where
 //  B: 0.272295..0.938012
 // The maximum pixel-wise difference has to be <= 1 for the ssim formula to make
 // sense.
+#[inline(always)]
 fn make_positive_xyb(xyb: &mut Xyb) {
     for pix in xyb.data_mut().iter_mut() {
         pix[2] = (pix[2] - pix[1]) + 0.55;
@@ -134,7 +188,8 @@ fn make_positive_xyb(xyb: &mut Xyb) {
     }
 }
 
-fn xyb_to_planar(xyb: &Xyb) -> [Vec<f32>; 3] {
+#[inline(always)]
+pub fn xyb_to_planar(xyb: &Xyb) -> [Vec<f32>; 3] {
     let mut out1 = vec![0.0f32; xyb.width() * xyb.height()];
     let mut out2 = vec![0.0f32; xyb.width() * xyb.height()];
     let mut out3 = vec![0.0f32; xyb.width() * xyb.height()];
@@ -154,7 +209,9 @@ fn xyb_to_planar(xyb: &Xyb) -> [Vec<f32>; 3] {
     [out1, out2, out3]
 }
 
-fn image_multiply(img1: &[Vec<f32>; 3], img2: &[Vec<f32>; 3], out: &mut [Vec<f32>; 3]) {
+#[inline(always)]
+// 2.3625ms
+pub fn image_multiply(img1: &[Vec<f32>; 3], img2: &[Vec<f32>; 3], out: &mut [Vec<f32>; 3]) {
     for ((plane1, plane2), out_plane) in img1.iter().zip(img2.iter()).zip(out.iter_mut()) {
         for ((&p1, &p2), o) in plane1.iter().zip(plane2.iter()).zip(out_plane.iter_mut()) {
             *o = p1 * p2;
@@ -162,7 +219,9 @@ fn image_multiply(img1: &[Vec<f32>; 3], img2: &[Vec<f32>; 3], out: &mut [Vec<f32
     }
 }
 
-fn downscale_by_2(in_data: &LinearRgb) -> LinearRgb {
+#[inline(always)]
+/// 1.7866ms
+pub fn downscale_by_2(in_data: &LinearRgb) -> LinearRgb {
     const SCALE: usize = 2;
     let in_w = in_data.width();
     let in_h = in_data.height();
@@ -170,23 +229,69 @@ fn downscale_by_2(in_data: &LinearRgb) -> LinearRgb {
     let out_h = (in_h + SCALE - 1) / SCALE;
     let mut out_data = vec![[0.0f32; 3]; out_w * out_h];
     let normalize = 1f32 / (SCALE * SCALE) as f32;
+    let in_data = in_data.data();
 
-    let in_data = &in_data.data();
-    for oy in 0..out_h {
-        for ox in 0..out_w {
-            for c in 0..3 {
-                let mut sum = 0f32;
-                for iy in 0..SCALE {
-                    for ix in 0..SCALE {
-                        let x = (ox * SCALE + ix).min(in_w - 1);
-                        let y = (oy * SCALE + iy).min(in_h - 1);
-                        let in_pix = in_data[y * in_w + x];
+    // "Process the inner area without boundaries first"
+    let safe_h = in_h - (in_h % SCALE);
+    let safe_w = in_w - (in_w % SCALE);
 
-                        sum += in_pix[c];
+    for oy in 0..(safe_h / SCALE) {
+        let y_base = oy * SCALE;
+        for ox in 0..(safe_w / SCALE) {
+            let x_base = ox * SCALE;
+            let out_idx = oy * out_w + ox;
+
+            // "Unroll the loop to access all pixels directly"
+            let p00 = in_data[y_base * in_w + x_base];
+            let p01 = in_data[y_base * in_w + (x_base + 1)];
+            let p10 = in_data[(y_base + 1) * in_w + x_base];
+            let p11 = in_data[(y_base + 1) * in_w + (x_base + 1)];
+
+            out_data[out_idx][0] = (p00[0] + p01[0] + p10[0] + p11[0]) * normalize;
+            out_data[out_idx][1] = (p00[1] + p01[1] + p10[1] + p11[1]) * normalize;
+            out_data[out_idx][2] = (p00[2] + p01[2] + p10[2] + p11[2]) * normalize;
+        }
+    }
+
+    if safe_w < in_w || safe_h < in_h {
+        for oy in 0..out_h {
+            let y_start = oy * SCALE;
+            for ox in 0..out_w {
+                if oy < safe_h / SCALE && ox < safe_w / SCALE {
+                    continue;
+                }
+
+                let x_start = ox * SCALE;
+                let out_idx = oy * out_w + ox;
+                let mut r = 0.0;
+                let mut g = 0.0;
+                let mut b = 0.0;
+                let mut count = 0;
+
+                for dy in 0..SCALE {
+                    let y = y_start + dy;
+                    if y >= in_h {
+                        continue;
+                    }
+
+                    for dx in 0..SCALE {
+                        let x = x_start + dx;
+                        if x >= in_w {
+                            continue;
+                        }
+
+                        let pixel = in_data[y * in_w + x];
+                        r += pixel[0];
+                        g += pixel[1];
+                        b += pixel[2];
+                        count += 1;
                     }
                 }
-                let out_pix = &mut out_data[oy * out_w + ox];
-                out_pix[c] = sum * normalize;
+
+                let scale = if count > 0 { 1.0 / count as f32 } else { 0.0 };
+                out_data[out_idx][0] = r * scale;
+                out_data[out_idx][1] = g * scale;
+                out_data[out_idx][2] = b * scale;
             }
         }
     }
@@ -194,7 +299,9 @@ fn downscale_by_2(in_data: &LinearRgb) -> LinearRgb {
     LinearRgb::new(out_data, out_w, out_h).expect("Resolution and data size match")
 }
 
-fn ssim_map(
+#[inline(always)]
+// 4.5360ms
+pub fn ssim_map(
     width: usize,
     height: usize,
     m1: &[Vec<f32>; 3],
@@ -203,56 +310,93 @@ fn ssim_map(
     s22: &[Vec<f32>; 3],
     s12: &[Vec<f32>; 3],
 ) -> [f64; 3 * 2] {
-    const C2: f32 = 0.0009f32;
-
     let one_per_pixels = 1.0f64 / (width * height) as f64;
     let mut plane_averages = [0f64; 3 * 2];
 
-    for c in 0..3 {
-        let mut sum1 = [0.0f64; 2];
-        for (row_m1, (row_m2, (row_s11, (row_s22, row_s12)))) in m1[c].chunks_exact(width).zip(
-            m2[c].chunks_exact(width).zip(
-                s11[c]
-                    .chunks_exact(width)
-                    .zip(s22[c].chunks_exact(width).zip(s12[c].chunks_exact(width))),
-            ),
-        ) {
-            for x in 0..width {
-                let mu1 = row_m1[x];
-                let mu2 = row_m2[x];
-                let mu11 = mu1 * mu1;
-                let mu22 = mu2 * mu2;
-                let mu12 = mu1 * mu2;
-                let mu_diff = mu1 - mu2;
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        let results: Vec<(usize, [f64; 2])> = (0..3)
+            .into_par_iter()
+            .map(|c| {
+                let sums = compute_channel_sums(width, c, m1, m2, s11, s22, s12);
+                (c, sums)
+            })
+            .collect();
 
-                // Correction applied compared to the original SSIM formula, which has:
-                //   luma_err = 2 * mu1 * mu2 / (mu1^2 + mu2^2)
-                //            = 1 - (mu1 - mu2)^2 / (mu1^2 + mu2^2)
-                // The denominator causes error in the darks (low mu1 and mu2) to weigh
-                // more than error in the brights (high mu1 and mu2). This would make
-                // sense if values correspond to linear luma. However, the actual values
-                // are either gamma-compressed luma (which supposedly is already
-                // perceptually uniform) or chroma (where weighing green more than red
-                // or blue more than yellow does not make any sense at all). So it is
-                // better to simply drop this denominator.
-                let num_m = mu_diff.mul_add(-mu_diff, 1.0f32);
-                let num_s = 2f32.mul_add(row_s12[x] - mu12, C2);
-                let denom_s = (row_s11[x] - mu11) + (row_s22[x] - mu22) + C2;
-                // Use 1 - SSIM' so it becomes an error score instead of a quality
-                // index. This makes it make sense to compute an L_4 norm.
-                let mut d = 1.0f64 - f64::from((num_m * num_s) / denom_s);
-                d = d.max(0.0);
-                sum1[0] += d;
-                sum1[1] += d.powi(4);
-            }
+        for (c, sums) in results {
+            plane_averages[c * 2] = one_per_pixels * sums[0];
+            plane_averages[c * 2 + 1] = (one_per_pixels * sums[1]).sqrt().sqrt();
         }
-        plane_averages[c * 2] = one_per_pixels * sum1[0];
-        plane_averages[c * 2 + 1] = (one_per_pixels * sum1[1]).sqrt().sqrt();
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        for c in 0..3 {
+            let sums = compute_channel_sums(width, c, m1, m2, s11, s22, s12);
+            plane_averages[c * 2] = one_per_pixels * sums[0];
+            plane_averages[c * 2 + 1] = (one_per_pixels * sums[1]).sqrt().sqrt();
+        }
     }
 
     plane_averages
 }
 
+#[inline(always)]
+fn compute_channel_sums(
+    width: usize,
+    c: usize,
+    m1: &[Vec<f32>; 3],
+    m2: &[Vec<f32>; 3],
+    s11: &[Vec<f32>; 3],
+    s22: &[Vec<f32>; 3],
+    s12: &[Vec<f32>; 3],
+) -> [f64; 2] {
+    const C2: f32 = 0.0009f32;
+    let mut sums = [0.0f64; 2];
+
+    for (row_idx, (row_m1, row_m2)) in m1[c]
+        .chunks_exact(width)
+        .zip(m2[c].chunks_exact(width))
+        .enumerate()
+    {
+        let row_offset = row_idx * width;
+        for x in 0..width {
+            let mu1 = row_m1[x];
+            let mu2 = row_m2[x];
+            let mu_diff = mu1 - mu2;
+
+            // Correction applied compared to the original SSIM formula, which has:
+            //   luma_err = 2 * mu1 * mu2 / (mu1^2 + mu2^2)
+            //            = 1 - (mu1 - mu2)^2 / (mu1^2 + mu2^2)
+            // The denominator causes error in the darks (low mu1 and mu2) to weigh
+            // more than error in the brights (high mu1 and mu2). This would make
+            // sense if values correspond to linear luma. However, the actual values
+            // are either gamma-compressed luma (which supposedly is already
+            // perceptually uniform) or chroma (where weighing green more than red
+            // or blue more than yellow does not make any sense at all). So it is
+            // better to simply drop this denominator.
+            let num_m = mu_diff.mul_add(-mu_diff, 1.0);
+            let mu12 = mu1 * mu2;
+            let sigma12 = s12[c][row_offset + x] - mu12;
+            let num_s = 2.0f32.mul_add(sigma12, C2);
+            let sigma1_sq = s11[c][row_offset + x] - mu1 * mu1;
+            let sigma2_sq = s22[c][row_offset + x] - mu2 * mu2;
+            let denom_s = sigma1_sq + sigma2_sq + C2;
+
+            let ssim = (num_m * num_s) / denom_s;
+            let err = (1.0 - f64::from(ssim)).max(0.0);
+
+            sums[0] += err;
+            let err_sq = err * err;
+            sums[1] += err_sq * err_sq;
+        }
+    }
+
+    sums
+}
+
+#[inline(always)]
+// 12.492ms ssimulacra2 bench
 fn edge_diff_map(
     width: usize,
     height: usize,
@@ -265,34 +409,46 @@ fn edge_diff_map(
     let mut plane_averages = [0f64; 3 * 4];
 
     for c in 0..3 {
-        let mut sum1 = [0.0f64; 4];
+        // cache
+        let mut artifact_sum = 0.0f64;
+        let mut artifact_pow4_sum = 0.0f64;
+        let mut detail_lost_sum = 0.0f64;
+        let mut detail_lost_pow4_sum = 0.0f64;
+
         for (row1, (row2, (rowm1, rowm2))) in img1[c].chunks_exact(width).zip(
             img2[c]
                 .chunks_exact(width)
                 .zip(mu1[c].chunks_exact(width).zip(mu2[c].chunks_exact(width))),
         ) {
             for x in 0..width {
-                let d1: f64 = (1.0 + f64::from((row2[x] - rowm2[x]).abs()))
-                    / (1.0 + f64::from((row1[x] - rowm1[x]).abs()))
-                    - 1.0;
+                let diff1 = f64::from((row1[x] - rowm1[x]).abs());
+                let diff2 = f64::from((row2[x] - rowm2[x]).abs());
+
+                let d1 = (1.0 + diff2) / (1.0 + diff1) - 1.0;
 
                 // d1 > 0: distorted has an edge where original is smooth
                 //         (indicating ringing, color banding, blockiness, etc)
-                let artifact = d1.max(0.0);
-                sum1[0] += artifact;
-                sum1[1] += artifact.powi(4);
+                let artifact = 0.5 * (d1 + d1.abs()); // if d1 is positive, d1; if negative, 0
+                artifact_sum += artifact;
+
+                let artifact_squared = artifact * artifact;
+                artifact_pow4_sum += artifact_squared * artifact_squared;
 
                 // d1 < 0: original has an edge where distorted is smooth
                 //         (indicating smoothing, blurring, smearing, etc)
-                let detail_lost = (-d1).max(0.0);
-                sum1[2] += detail_lost;
-                sum1[3] += detail_lost.powi(4);
+                let detail_lost = 0.5 * (-d1 + d1.abs()); // if d1 is negative, -d1; if positive, 0
+                detail_lost_sum += detail_lost;
+                let detail_lost_squared = detail_lost * detail_lost;
+                detail_lost_pow4_sum += detail_lost_squared * detail_lost_squared;
             }
         }
-        plane_averages[c * 4] = one_per_pixels * sum1[0];
-        plane_averages[c * 4 + 1] = (one_per_pixels * sum1[1]).sqrt().sqrt();
-        plane_averages[c * 4 + 2] = one_per_pixels * sum1[2];
-        plane_averages[c * 4 + 3] = (one_per_pixels * sum1[3]).sqrt().sqrt();
+
+        // Calculate the averages for the current channel
+        let base_idx = c * 4;
+        plane_averages[base_idx] = one_per_pixels * artifact_sum;
+        plane_averages[base_idx + 1] = (one_per_pixels * artifact_pow4_sum).sqrt().sqrt();
+        plane_averages[base_idx + 2] = one_per_pixels * detail_lost_sum;
+        plane_averages[base_idx + 3] = (one_per_pixels * detail_lost_pow4_sum).sqrt().sqrt();
     }
 
     plane_averages
@@ -341,6 +497,7 @@ impl Msssim {
     //    KADID-10k: 0.6175 | 0.8133 | 0.8030
     //    KonFiG(F): 0.7668 | 0.9194 | 0.9136
     #[allow(clippy::too_many_lines)]
+    #[inline(always)]
     pub fn score(&self) -> f64 {
         const WEIGHT: [f64; 108] = [
             0.0,
@@ -489,7 +646,7 @@ impl Msssim {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, time::Instant};
 
     use super::*;
     use yuvxyb::Rgb;
@@ -540,12 +697,82 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        let start = Instant::now();
         let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
+        let elapsed = start.elapsed();
+        println!("Elapsed time: {:?}", elapsed);
         let expected = 17.398_505_f64;
+
+        println!("Result: {result:.6}");
+        println!("Expected: {expected:.6}");
+        println!("Diff: {:.3}", (result - expected).abs());
         assert!(
             // SOMETHING is WEIRD with Github CI where it gives different results across DIFFERENT
             // RUNS
             (result - expected).abs() < 0.25f64,
+            "Result {result:.6} not equal to expected {expected:.6}",
+        );
+    }
+
+    #[test]
+    fn test2_ssimulacra2() {
+        let source = image::open(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("test_data")
+                .join("test_image_4.png"),
+        )
+        .unwrap();
+        let distorted = image::open(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("test_data")
+                .join("test_image_4.jpg"),
+        )
+        .unwrap();
+
+        let source_data = source
+            .to_rgb32f()
+            .chunks_exact(3)
+            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+            .collect::<Vec<_>>();
+        let source_data = Xyb::try_from(
+            Rgb::new(
+                source_data,
+                source.width() as usize,
+                source.height() as usize,
+                TransferCharacteristic::SRGB,
+                ColorPrimaries::BT709,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let distorted_data = distorted
+            .to_rgb32f()
+            .chunks_exact(3)
+            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+            .collect::<Vec<_>>();
+        let distorted_data = Xyb::try_from(
+            Rgb::new(
+                distorted_data,
+                distorted.width() as usize,
+                distorted.height() as usize,
+                TransferCharacteristic::SRGB,
+                ColorPrimaries::BT709,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let start = Instant::now();
+        let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
+        let elapsed = start.elapsed();
+        println!("Elapsed time: {:?}", elapsed);
+        let expected = 84.031_931_f64;
+        println!("Result: {result:.6}");
+        println!("Expected: {expected:.6}");
+        println!("Diff: {:.3}", (result - expected).abs());
+        assert!(
+            // SOMETHING is WEIRD with Github CI where it gives different results across DIFFERENT
+            // RUNS
+            (result - expected).abs() < 1.0f64,
             "Result {result:.6} not equal to expected {expected:.6}",
         );
     }

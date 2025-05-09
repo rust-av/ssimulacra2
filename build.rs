@@ -121,13 +121,13 @@ fn init_recursive_gaussian(out_path: &str) -> io::Result<()> {
 
     write_const_usize(&mut out_file, "RADIUS", radius as usize)?;
 
-    write_const_f32(&mut out_file, "VERT_MUL_IN_1", n2[0] as f32)?;
-    write_const_f32(&mut out_file, "VERT_MUL_IN_3", n2[1] as f32)?;
-    write_const_f32(&mut out_file, "VERT_MUL_IN_5", n2[2] as f32)?;
+    // write_const_f32(&mut out_file, "VERT_MUL_IN_1", n2[0] as f32)?;
+    // write_const_f32(&mut out_file, "VERT_MUL_IN_3", n2[1] as f32)?;
+    // write_const_f32(&mut out_file, "VERT_MUL_IN_5", n2[2] as f32)?;
 
-    write_const_f32(&mut out_file, "VERT_MUL_PREV_1", d1[0] as f32)?;
-    write_const_f32(&mut out_file, "VERT_MUL_PREV_3", d1[1] as f32)?;
-    write_const_f32(&mut out_file, "VERT_MUL_PREV_5", d1[2] as f32)?;
+    // write_const_f32(&mut out_file, "VERT_MUL_PREV_1", d1[0] as f32)?;
+    // write_const_f32(&mut out_file, "VERT_MUL_PREV_3", d1[1] as f32)?;
+    // write_const_f32(&mut out_file, "VERT_MUL_PREV_5", d1[2] as f32)?;
 
     write_const_f32(&mut out_file, "MUL_IN_1", mul_in[0])?;
     write_const_f32(&mut out_file, "MUL_IN_3", mul_in[4])?;

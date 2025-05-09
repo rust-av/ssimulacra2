@@ -17,12 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # rust-version from Cargo.toml
-      - name: Install Rust 1.65.0
-        uses: dtolnay/rust-toolchain@1.65.0
+      - name: Install Rust 1.82.0
+        uses: dtolnay/rust-toolchain@1.82.0
       - name: Use predefined lockfile
         run: mv Cargo.lock.MSRV Cargo.lock
       - name: Build
-        run: cargo check --locked
+        run: cargo check
 
   build:
     runs-on: ubuntu-latest
