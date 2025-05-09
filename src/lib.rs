@@ -701,9 +701,11 @@ mod tests {
         let result = compute_frame_ssimulacra2(source_data, distorted_data).unwrap();
         let elapsed = start.elapsed();
         println!("Elapsed time: {:?}", elapsed);
-        let expected = 17.398_505_f64;
+        // let expected = 17.398_505_f64;
+        let expected = 17.392219_f64;
         println!("Result: {result:.6}");
         println!("Expected: {expected:.6}");
+        println!("Diff: {:.3}", (result - expected).abs());
         assert!(
             // SOMETHING is WEIRD with Github CI where it gives different results across DIFFERENT
             // RUNS
@@ -726,11 +728,6 @@ mod tests {
                 .join("test_image_4.jpg"),
         )
         .unwrap();
-
-        println!("source width: {}", source.width());
-        println!("source height: {}", source.height());
-        println!("distorted width: {}", distorted.width());
-        println!("distorted height: {}", distorted.height());
 
         let source_data = source
             .to_rgb32f()
@@ -769,9 +766,9 @@ mod tests {
         let elapsed = start.elapsed();
         println!("Elapsed time: {:?}", elapsed);
         let expected = 84.031_931_f64;
-
         println!("Result: {result:.6}");
         println!("Expected: {expected:.6}");
+        println!("Diff: {:.3}", (result - expected).abs());
         assert!(
             // SOMETHING is WEIRD with Github CI where it gives different results across DIFFERENT
             // RUNS

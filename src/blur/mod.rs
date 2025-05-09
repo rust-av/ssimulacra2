@@ -1,6 +1,6 @@
 #[cfg(not(feature = "libblur"))]
 mod gaussian_impl;
-#[cfg(all(feature = "rayon", feature = "libblur"))]
+#[cfg(feature = "libblur")]
 mod libblur_impl;
 use crate::Ssimulacra2Error;
 
@@ -28,5 +28,5 @@ pub trait BlurOperator {
 #[cfg(not(feature = "libblur"))]
 pub use gaussian_impl::GaussianBlur as Blur;
 
-#[cfg(all(feature = "rayon", feature = "libblur"))]
+#[cfg(feature = "libblur")]
 pub use libblur_impl::LibBlur as Blur;
