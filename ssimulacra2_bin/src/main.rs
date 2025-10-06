@@ -166,6 +166,10 @@ fn main() {
 
 fn compare_images(source: &Path, distorted: &Path) {
     // For now just assumes the input is sRGB. Trying to keep this as simple as possible for now.
+    #[cfg(feature = "jxl")]
+    {   
+        let _jxl = jxl_oxide::integration::register_image_decoding_hook();
+    }
     let source = image::open(source).expect("Failed to open source file");
     let distorted = image::open(distorted).expect("Failed to open distorted file");
 
