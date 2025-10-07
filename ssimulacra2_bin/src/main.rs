@@ -4,10 +4,11 @@ mod video;
 #[cfg(feature = "video")]
 use self::video::*;
 use clap::{Parser, Subcommand};
+use image::ImageReader;
 #[cfg(feature = "video")]
 use ssimulacra2::MatrixCoefficients;
 use ssimulacra2::{compute_frame_ssimulacra2, ColorPrimaries, Rgb, TransferCharacteristic};
-use std::path::{Path, PathBuf};
+use std::{fs::File, path::{Path, PathBuf}};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -170,8 +171,19 @@ fn compare_images(source: &Path, distorted: &Path) {
     {   
         let _jxl = jxl_oxide::integration::register_image_decoding_hook();
     }
-    let source = image::open(source).expect("Failed to open source file");
-    let distorted = image::open(distorted).expect("Failed to open distorted file");
+
+    let mut source_reader = ImageReader::open(source)
+        .expect("Failed to open source file")
+        .with_guessed_format()
+        .expect("failed to guess source format");
+    let mut distorted_reader = ImageReader::open(distorted)
+        .expect("Failed to open distorted file")
+        .with_guessed_format()
+        .expect("failed to guess distorted format");
+    source_reader.no_limits();
+    distorted_reader.no_limits();
+    let source  = source_reader.decode().expect("failed to decode source file");
+    let distorted = distorted_reader.decode().expect("failed to decode distorted file");
 
     let source_data = source
         .to_rgb32f()
