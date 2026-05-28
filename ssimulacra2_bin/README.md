@@ -14,6 +14,35 @@ The following is a rough estimate of how ssimulacra2 scores correspond to visual
 - 70 = high quality. This corresponds to the average output of cjxl -q 65 or mozjpeg -quality 70, p10 output of cjxl -q 75 or mozjpeg -quality 80.
 - 90 = very high quality. Likely impossible to distinguish from the original when viewed at 1:1 from a normal viewing distance. This corresponds to the average output of mozjpeg -quality 95 or the p10 output of cjxl -q
 
+## Color profile handling
+
+When comparing still images (PNG, JPEG), the binary reads embedded ICC color profiles
+and converts pixels to sRGB before computing the metric. This matches the behavior of
+the C++ ssimulacra2 tool from libjxl.
+
+- **PNG**: ICC profiles are read from the `iCCP` chunk.
+- **JPEG**: ICC profiles are read from APP2 markers.
+- **Other formats** (WebP, HDR, EXR, etc.): fall back to assuming sRGB (previous behavior).
+- **No profile embedded**: pixels are treated as sRGB (previous behavior).
+
+The conversion uses lcms2 with relative colorimetric rendering intent.
+
+### `--no-icc` flag
+
+Pass `--no-icc` to disable ICC conversion and treat all inputs as sRGB regardless of
+embedded profiles. This reproduces the tool's previous behavior and is useful for
+benchmarking or comparing scores across tool versions.
+
+```
+ssimulacra2_rs image --no-icc source.png distorted.png
+```
+
+### Alpha channel handling
+
+When either input has an alpha channel (PNG with transparency), the binary composites
+both images against two backgrounds (luminance 0.1 and 0.9) and reports the worse
+(lower) score. This matches the C++ reference implementation.
+
 ## Required packages for video support:
 
 ### Arch
