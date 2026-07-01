@@ -1,3 +1,4 @@
+mod icc;
 #[cfg(feature = "video")]
 mod video;
 
@@ -29,6 +30,10 @@ enum Commands {
         /// Distorted image
         #[arg(help = "Distorted image", value_hint = clap::ValueHint::FilePath)]
         distorted: PathBuf,
+
+        /// Disable ICC color profile conversion (assume sRGB)
+        #[arg(long)]
+        no_icc: bool,
     },
     /// Compare two videos. Resolutions and frame counts must be identical.
     #[cfg(feature = "video")]
@@ -102,7 +107,11 @@ enum Commands {
 
 fn main() {
     match Cli::parse().command {
-        Commands::Image { source, distorted } => compare_images(&source, &distorted),
+        Commands::Image {
+            source,
+            distorted,
+            no_icc,
+        } => compare_images(&source, &distorted, !no_icc),
         #[cfg(feature = "video")]
         Commands::Video {
             source,
@@ -164,43 +173,89 @@ fn main() {
     }
 }
 
-fn compare_images(source: &Path, distorted: &Path) {
-    // For now just assumes the input is sRGB. Trying to keep this as simple as possible for now.
-    let source = image::open(source).expect("Failed to open source file");
-    let distorted = image::open(distorted).expect("Failed to open distorted file");
+fn compare_images(source: &Path, distorted: &Path, use_icc: bool) {
+    let src = icc::decode_image(source, use_icc);
+    let dst = icc::decode_image(distorted, use_icc);
 
-    let source_data = source
-        .to_rgb32f()
-        .chunks_exact(3)
-        .map(|chunk| [chunk[0], chunk[1], chunk[2]])
-        .collect::<Vec<_>>();
+    let has_alpha = src.alpha.is_some() || dst.alpha.is_some();
 
-    let source_data = Rgb::new(
-        source_data,
-        source.width() as usize,
-        source.height() as usize,
-        TransferCharacteristic::SRGB,
-        ColorPrimaries::BT709,
-    )
-    .expect("Failed to process source_data into RGB");
+    if has_alpha {
+        let score = compute_alpha_aware_score(&src, &dst);
+        println!("Score: {score:.8}");
+    } else {
+        let source_data = Rgb::new(
+            src.pixels,
+            src.width,
+            src.height,
+            TransferCharacteristic::SRGB,
+            ColorPrimaries::BT709,
+        )
+        .expect("Failed to process source into RGB");
 
-    let distorted_data = distorted
-        .to_rgb32f()
-        .chunks_exact(3)
-        .map(|chunk| [chunk[0], chunk[1], chunk[2]])
-        .collect::<Vec<_>>();
+        let distorted_data = Rgb::new(
+            dst.pixels,
+            dst.width,
+            dst.height,
+            TransferCharacteristic::SRGB,
+            ColorPrimaries::BT709,
+        )
+        .expect("Failed to process distorted into RGB");
 
-    let distorted_data = Rgb::new(
-        distorted_data,
-        distorted.width() as usize,
-        distorted.height() as usize,
-        TransferCharacteristic::SRGB,
-        ColorPrimaries::BT709,
-    )
-    .expect("Failed to process distorted_data into RGB");
+        let result = compute_frame_ssimulacra2(source_data, distorted_data)
+            .expect("Failed to calculate ssimulacra2");
 
-    let result = compute_frame_ssimulacra2(source_data, distorted_data)
-        .expect("Failed to calculate ssimulacra2");
+        println!("Score: {result:.8}");
+    }
+}
 
-    println!("Score: {result:.8}");
+fn compute_alpha_aware_score(src: &icc::DecodedImage, dst: &icc::DecodedImage) -> f64 {
+    let src_alpha_default: Vec<f32>;
+    let dst_alpha_default: Vec<f32>;
+
+    let src_alpha = match &src.alpha {
+        Some(a) => a.as_slice(),
+        None => {
+            src_alpha_default = vec![1.0; src.pixels.len()];
+            &src_alpha_default
+        }
+    };
+    let dst_alpha = match &dst.alpha {
+        Some(a) => a.as_slice(),
+        None => {
+            dst_alpha_default = vec![1.0; dst.pixels.len()];
+            &dst_alpha_default
+        }
+    };
+
+    let mut worst = f64::MAX;
+
+    for bg in [0.1_f32, 0.9_f32] {
+        let src_composited = icc::composite_over_background(&src.pixels, src_alpha, bg);
+        let dst_composited = icc::composite_over_background(&dst.pixels, dst_alpha, bg);
+
+        let source_data = Rgb::new(
+            src_composited,
+            src.width,
+            src.height,
+            TransferCharacteristic::SRGB,
+            ColorPrimaries::BT709,
+        )
+        .expect("Failed to process source into RGB");
+
+        let distorted_data = Rgb::new(
+            dst_composited,
+            dst.width,
+            dst.height,
+            TransferCharacteristic::SRGB,
+            ColorPrimaries::BT709,
+        )
+        .expect("Failed to process distorted into RGB");
+
+        let score = compute_frame_ssimulacra2(source_data, distorted_data)
+            .expect("Failed to calculate ssimulacra2");
+
+        worst = worst.min(score);
+    }
+
+    worst
 }
