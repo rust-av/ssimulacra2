@@ -40,11 +40,21 @@ fn decode_png(path: &Path, use_icc: bool) -> DecodedImage {
         None
     };
 
-    let mut buf = vec![0u8; reader.output_buffer_size()];
-    let output_info = reader.next_frame(&mut buf).expect("Failed to decode PNG frame");
+    let mut buf = vec![
+        0u8;
+        reader
+            .output_buffer_size()
+            .expect("Decoded image too large for system RAM")
+    ];
+    let output_info = reader
+        .next_frame(&mut buf)
+        .expect("Failed to decode PNG frame");
     let raw = &buf[..output_info.buffer_size()];
 
-    let has_alpha = matches!(color_type, png::ColorType::Rgba | png::ColorType::GrayscaleAlpha);
+    let has_alpha = matches!(
+        color_type,
+        png::ColorType::Rgba | png::ColorType::GrayscaleAlpha
+    );
     let is_grayscale = matches!(
         color_type,
         png::ColorType::Grayscale | png::ColorType::GrayscaleAlpha
@@ -77,16 +87,28 @@ fn decode_png_8bit(
 
     assert_eq!(raw.len(), pixel_count * channels);
 
-    let (rgb_bytes, alpha) = extract_rgb_alpha_u8(raw, pixel_count, channels, has_alpha, is_grayscale);
+    let (rgb_bytes, alpha) =
+        extract_rgb_alpha_u8(raw, pixel_count, channels, has_alpha, is_grayscale);
 
     let rgb_bytes = apply_icc_transform_u8(rgb_bytes, icc_profile);
 
     let pixels: Vec<[f32; 3]> = rgb_bytes
         .chunks_exact(3)
-        .map(|c| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0])
+        .map(|c| {
+            [
+                c[0] as f32 / 255.0,
+                c[1] as f32 / 255.0,
+                c[2] as f32 / 255.0,
+            ]
+        })
         .collect();
 
-    DecodedImage { pixels, width, height, alpha }
+    DecodedImage {
+        pixels,
+        width,
+        height,
+        alpha,
+    }
 }
 
 fn decode_png_16bit(
@@ -108,7 +130,8 @@ fn decode_png_16bit(
 
     assert_eq!(raw.len(), pixel_count * channels * 2);
 
-    let (rgb_u16, alpha) = extract_rgb_alpha_u16(raw, pixel_count, channels, has_alpha, is_grayscale);
+    let (rgb_u16, alpha) =
+        extract_rgb_alpha_u16(raw, pixel_count, channels, has_alpha, is_grayscale);
 
     let rgb_u16 = apply_icc_transform_u16(rgb_u16, icc_profile);
 
@@ -123,7 +146,12 @@ fn decode_png_16bit(
         })
         .collect();
 
-    DecodedImage { pixels, width, height, alpha }
+    DecodedImage {
+        pixels,
+        width,
+        height,
+        alpha,
+    }
 }
 
 fn extract_rgb_alpha_u8(
@@ -341,7 +369,9 @@ fn decode_cmyk_to_rgb(cmyk: &[u8], pixel_count: usize, icc_profile: &Option<Vec<
     ) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Warning: failed to create CMYK ICC transform ({e}), using naive CMYK conversion");
+            eprintln!(
+                "Warning: failed to create CMYK ICC transform ({e}), using naive CMYK conversion"
+            );
             return naive_cmyk_to_rgb(cmyk, pixel_count);
         }
     };
@@ -361,11 +391,7 @@ fn decode_jpeg(path: &Path, use_icc: bool) -> DecodedImage {
     let height = metadata.height as usize;
     let pixel_count = width * height;
 
-    let icc_profile = if use_icc {
-        decoder.icc_profile()
-    } else {
-        None
-    };
+    let icc_profile = if use_icc { decoder.icc_profile() } else { None };
 
     let rgb_bytes = match metadata.pixel_format {
         jpeg_decoder::PixelFormat::RGB24 => apply_icc_transform_u8(raw, &icc_profile),
@@ -393,7 +419,13 @@ fn decode_jpeg(path: &Path, use_icc: bool) -> DecodedImage {
 
     let pixels: Vec<[f32; 3]> = rgb_bytes
         .chunks_exact(3)
-        .map(|c| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0])
+        .map(|c| {
+            [
+                c[0] as f32 / 255.0,
+                c[1] as f32 / 255.0,
+                c[2] as f32 / 255.0,
+            ]
+        })
         .collect();
 
     DecodedImage {
