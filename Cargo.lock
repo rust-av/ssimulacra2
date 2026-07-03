@@ -2033,6 +2033,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "700cb4e17f98c3f36756815b18dbec2b2e3c4f5028e9cdee3e23dd8c285e736c"
 dependencies = [
  "num-traits",
+ "rayon",
  "thiserror 2.0.18",
  "yuvxyb",
  "yuvxyb-math",
