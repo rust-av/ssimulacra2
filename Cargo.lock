@@ -2054,6 +2054,7 @@ dependencies = [
  "num-traits",
  "plotters",
  "png",
+ "rayon",
  "ssimulacra2 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "statrs",
 ]

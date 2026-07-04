@@ -404,7 +404,17 @@ fn compare_videos_inner<D: Decoder + 'static, E: Decoder + 'static>(
         let result_tx = result_tx.clone();
 
         std::thread::spawn(move || {
-            loop {
+            // Frame-level threading already saturates the CPU here; the lib's
+            // rayon feature must not multiply it (see ssimulacra2_bin#21).
+            // Running this worker inside a single-threaded local pool keeps
+            // the lib's rayon code path sequential per frame, so video-mode
+            // behavior and CPU usage match the previous non-rayon build,
+            // while image mode gets the default (parallel) pool.
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .expect("failed to build single-threaded rayon pool");
+            pool.install(|| loop {
                 let score = match (src_bd, dst_bd) {
                     (8, 8) => calc_score::<u8, u8, _, _>(
                         &video_compare,
@@ -446,7 +456,7 @@ fn compare_videos_inner<D: Decoder + 'static, E: Decoder + 'static>(
                     // no score = no more frames to read
                     break;
                 }
-            }
+            });
         });
     }
 
