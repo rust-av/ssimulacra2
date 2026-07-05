@@ -136,12 +136,12 @@ fn decode_png_16bit(
     let rgb_u16 = apply_icc_transform_u16(rgb_u16, icc_profile);
 
     let pixels: Vec<[f32; 3]> = rgb_u16
-        .chunks_exact(3)
-        .map(|c| {
+        .iter()
+        .map(|px| {
             [
-                c[0] as f32 / 65535.0,
-                c[1] as f32 / 65535.0,
-                c[2] as f32 / 65535.0,
+                px[0] as f32 / 65535.0,
+                px[1] as f32 / 65535.0,
+                px[2] as f32 / 65535.0,
             ]
         })
         .collect();
@@ -197,8 +197,8 @@ fn extract_rgb_alpha_u16(
     channels: usize,
     has_alpha: bool,
     is_grayscale: bool,
-) -> (Vec<u16>, Option<Vec<f32>>) {
-    let mut rgb = Vec::with_capacity(pixel_count * 3);
+) -> (Vec<[u16; 3]>, Option<Vec<f32>>) {
+    let mut rgb = Vec::with_capacity(pixel_count);
     let mut alpha = if has_alpha {
         Some(Vec::with_capacity(pixel_count))
     } else {
@@ -209,17 +209,17 @@ fn extract_rgb_alpha_u16(
         let base = i * channels * 2;
         if is_grayscale {
             let g = u16::from_be_bytes([raw[base], raw[base + 1]]);
-            rgb.push(g);
-            rgb.push(g);
-            rgb.push(g);
+            rgb.push([g, g, g]);
             if has_alpha {
                 let a = u16::from_be_bytes([raw[base + 2], raw[base + 3]]);
                 alpha.as_mut().unwrap().push(a as f32 / 65535.0);
             }
         } else {
-            rgb.push(u16::from_be_bytes([raw[base], raw[base + 1]]));
-            rgb.push(u16::from_be_bytes([raw[base + 2], raw[base + 3]]));
-            rgb.push(u16::from_be_bytes([raw[base + 4], raw[base + 5]]));
+            rgb.push([
+                u16::from_be_bytes([raw[base], raw[base + 1]]),
+                u16::from_be_bytes([raw[base + 2], raw[base + 3]]),
+                u16::from_be_bytes([raw[base + 4], raw[base + 5]]),
+            ]);
             if has_alpha {
                 let a = u16::from_be_bytes([raw[base + 6], raw[base + 7]]);
                 alpha.as_mut().unwrap().push(a as f32 / 65535.0);
@@ -269,7 +269,7 @@ fn apply_icc_transform_u8(rgb: Vec<u8>, icc_profile: &Option<Vec<u8>>) -> Vec<u8
     dst
 }
 
-fn apply_icc_transform_u16(rgb: Vec<u16>, icc_profile: &Option<Vec<u8>>) -> Vec<u16> {
+fn apply_icc_transform_u16(rgb: Vec<[u16; 3]>, icc_profile: &Option<Vec<u8>>) -> Vec<[u16; 3]> {
     let Some(icc_data) = icc_profile else {
         return rgb;
     };
@@ -304,15 +304,11 @@ fn apply_icc_transform_u16(rgb: Vec<u16>, icc_profile: &Option<Vec<u8>>) -> Vec<
     };
 
     // lcms2-rs asserts that the element type size matches the pixel size:
-    // RGB_16 is 6 bytes per pixel, so we must transform [u16; 3] pixels, not
-    // bare u16 (only u8 slices are special-cased).
-    let src_pixels: Vec<[u16; 3]> = rgb
-        .chunks_exact(3)
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
-    let mut dst_pixels = vec![[0u16; 3]; src_pixels.len()];
-    transform.transform_pixels(&src_pixels, &mut dst_pixels);
-    dst_pixels.into_iter().flatten().collect()
+    // RGB_16 is 6 bytes per pixel, so the buffers must hold [u16; 3] pixels,
+    // not bare u16 (only u8 slices are special-cased).
+    let mut dst = vec![[0u16; 3]; rgb.len()];
+    transform.transform_pixels(&rgb, &mut dst);
+    dst
 }
 
 /// Naive CMYK -> RGB conversion, ignoring color management. Used when no usable
